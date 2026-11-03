@@ -1,0 +1,2560 @@
+/* ==========================================================================
+   手写数字生成器 & 字体制作器 (Complete Application Logic)
+   ========================================================================== */
+(function () {
+  'use strict';
+
+  const PX_PER_CM = 60; // 1 cm = 60 canvas pixels (152.4 DPI)
+
+  // Configure PDF.js worker if available
+  if (window.pdfjsLib) {
+    window.pdfjsLib.GlobalWorkerOptions.workerSrc = 'vendor/pdf.worker.min.js';
+  }
+
+  // Fallback for <dialog closedby="any"> per Modern Web Guidance
+  if (typeof HTMLDialogElement !== 'undefined' && !('closedBy' in HTMLDialogElement.prototype)) {
+    const isOutside = (e, dialog) => {
+      const r = dialog.getBoundingClientRect();
+      return e.clientX < r.left || e.clientX > r.right || e.clientY < r.top || e.clientY > r.bottom;
+    };
+    for (const dialog of document.querySelectorAll('dialog[closedby="any"]')) {
+      let pressedOutside = false;
+      dialog.addEventListener('pointerdown', (e) => {
+        pressedOutside = isOutside(e, dialog);
+      });
+      dialog.addEventListener('pointerup', (e) => {
+        if (pressedOutside && isOutside(e, dialog)) dialog.close();
+      });
+    }
+  }
+
+  // Sync native slider CSS custom properties per Modern Web Guidance
+  function syncNativeSlider(slider) {
+    if (!slider) return;
+    slider.style.setProperty('--attr-min', slider.min || 0);
+    slider.style.setProperty('--attr-max', slider.max || 100);
+    slider.style.setProperty('--control-value', slider.value);
+  }
+
+  function initAllNativeSliders() {
+    document.querySelectorAll('input[type="range"].native-slider').forEach((s) => {
+      syncNativeSlider(s);
+      s.addEventListener('input', () => syncNativeSlider(s));
+    });
+  }
+
+  // Deterministic PRNG (Mulberry32) so slider adjustments don't flicker digits
+  function mulberry32(a) {
+    return function () {
+      let t = (a += 0x6d2b79f5);
+      t = Math.imul(t ^ (t >>> 15), t | 1);
+      t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
+      return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+    };
+  }
+
+  function randRange(rng, minMax) {
+    const a = Number(minMax[0]) || 0;
+    const b = Number(minMax[1]) || 0;
+    const lo = Math.min(a, b);
+    const hi = Math.max(a, b);
+    return lo + rng() * (hi - lo);
+  }
+
+  function deepClone(obj) {
+    return JSON.parse(JSON.stringify(obj));
+  }
+
+  // =========================================================================
+  // Font Management & Glyph Image Cache
+  // =========================================================================
+  const fontsRegistry = [];
+  let activeFontIndex = 0;
+
+  async function loadFontFromData(fontData) {
+    const loadedGlyphs = {};
+    const labels = ['1', '2', '3', '4', '5', '6', '7', '8', '9', '0', '.'];
+    const promises = [];
+
+    for (const k of labels) {
+      loadedGlyphs[k] = [];
+      const arr = (fontData.glyphs && fontData.glyphs[k]) || [];
+      for (const item of arr) {
+        const p = new Promise((resolve) => {
+          const img = new Image();
+          img.onload = () => {
+            loadedGlyphs[k].push({
+              w: item.w || img.width,
+              h: item.h || img.height,
+              src: item.src,
+              img
+            });
+            resolve();
+          };
+          img.onerror = () => resolve();
+          img.src = item.src;
+        });
+        promises.push(p);
+      }
+    }
+    await Promise.all(promises);
+    const totalCount = Object.values(loadedGlyphs).reduce((acc, v) => acc + v.length, 0);
+    const entry = {
+      name: fontData.name || `自定义手写字体 #${fontsRegistry.length + 1}`,
+      glyphs: loadedGlyphs,
+      totalCount
+    };
+    fontsRegistry.push(entry);
+    activeFontIndex = fontsRegistry.length - 1;
+    refreshFontSelectUI();
+    return entry;
+  }
+
+  function refreshFontSelectUI() {
+    const sel = document.getElementById('fontSelect');
+    if (!sel) return;
+    sel.innerHTML = '';
+    fontsRegistry.forEach((f, idx) => {
+      const opt = document.createElement('option');
+      opt.value = String(idx);
+      opt.textContent = `${f.name} (${f.totalCount}个字形)`;
+      sel.appendChild(opt);
+    });
+    sel.value = String(activeFontIndex);
+    const active = fontsRegistry[activeFontIndex];
+    const statusGlyph = document.getElementById('statusGlyphCount');
+    if (statusGlyph && active) {
+      statusGlyph.textContent = `当前字体: ${active.name} (${active.totalCount}个实拍字形)`;
+    }
+  }
+
+  // =========================================================================
+  // Parameter Schema for Dual-Thumb Randomization Sections
+  // =========================================================================
+  const RANDOM_SECTIONS_SCHEMA = {
+    cellRandom: {
+      mountId: 'mountCellRandom',
+      fields: [
+        { key: 'offsetX', label: '单元格随机左右偏移', leftTag: '左移', rightTag: '右移', min: -15, max: 15, step: 0.01, def: [-4.27, 4.94] },
+        { key: 'offsetY', label: '单元格随机上下偏移', leftTag: '下移', rightTag: '上移', min: -10, max: 10, step: 0.01, def: [-0.66, 2.12] },
+        { key: 'scale', label: '整体随机缩放', leftTag: '缩小', rightTag: '放大', min: -0.5, max: 0.5, step: 0.01, def: [-0.17, 0.21] },
+        { key: 'rotate', label: '单元格整体旋转', leftTag: '左转', rightTag: '右转', min: -15, max: 15, step: 0.01, def: [-2.0, 5.5] }
+      ]
+    },
+    charPosRandom: {
+      mountId: 'mountCharPosRandom',
+      fields: [
+        { key: 'offsetX', label: '水平位置', leftTag: '左移', rightTag: '右移', min: -10, max: 10, step: 0.01, def: [-1.01, 2.11] },
+        { key: 'offsetY', label: '垂直位置', leftTag: '下移', rightTag: '上移', min: -10, max: 10, step: 0.01, def: [-2.2, 0.8] },
+        { key: 'rotate', label: '单字旋转', leftTag: '左转', rightTag: '右转', min: -18, max: 18, step: 0.01, def: [-2.5, 2.5] },
+        { key: 'spacing', label: '字间距', leftTag: '重叠', rightTag: '分开', min: -35, max: 35, step: 0.1, def: [-6.0, 4.0] }
+      ]
+    },
+    charShapeRandom: {
+      mountId: 'mountCharShapeRandom',
+      fields: [
+        { key: 'size', label: '字体大小', leftTag: '缩小', rightTag: '放大', min: -0.4, max: 0.4, step: 0.01, def: [-0.06, 0.08] },
+        { key: 'bold', label: '字体随机加粗', leftTag: '默认', rightTag: '加粗', min: 0, max: 1.5, step: 0.01, def: [0, 0.35] },
+        { key: 'gray', label: '字体灰度', leftTag: '黑色', rightTag: '灰色', min: 0, max: 60, step: 0.5, def: [0, 18] },
+        { key: 'stretchX', label: '水平拉伸', leftTag: '压缩', rightTag: '拉伸', min: -0.4, max: 0.4, step: 0.01, def: [-0.06, 0.08] },
+        { key: 'stretchY', label: '垂直拉伸', leftTag: '压缩', rightTag: '拉伸', min: -0.4, max: 0.4, step: 0.01, def: [-0.06, 0.08] }
+      ]
+    },
+    dotRandom: {
+      mountId: 'mountDotRandom',
+      fields: [
+        { key: 'offsetY', label: '小数点上下', leftTag: '下移', rightTag: '上移', min: -12, max: 12, step: 0.01, def: [-1.2, 1.5] },
+        { key: 'size', label: '小数点大小', leftTag: '缩小', rightTag: '放大', min: -0.5, max: 0.8, step: 0.01, def: [-0.1, 0.25] }
+      ]
+    }
+  };
+
+  // =========================================================================
+  // Application State
+  // =========================================================================
+  const state = {
+    projectPath: '',
+    pages: [], // [{ width, height, widthCm, heightCm, img }]
+    currentPage: 1,
+    zoom: 145,
+    panX: 28,
+    panY: 24,
+    hideLegend: false,
+    showColRuler: false,
+    showRowRuler: false,
+    normalizeFontSize: true,
+    scratchEffect: false,
+    globalSeed: 20261103,
+    clipboardSection: {},
+    config: {
+      startX: 4.91,
+      startY: 3.82,
+      colWidth: 1.82,
+      rowHeight: 0.72,
+      cellPad: -0.28,
+      rows: 24,
+      cols: 10,
+      activeCols: [1, 3, 5, 7, 9],
+      colOffsets: {}, // optional per-column custom X offset in cm
+      pageConfigs: {}, // per-page overrides for startX, startY, rows
+      fillMode: 'random', // 'random' | 'manual'
+      visionPreset: false,
+      digitSlots: [
+        { type: 'digit', digits: [3] },
+        { type: 'digit', digits: [6] },
+        { type: 'dot', digits: ['.'] },
+        { type: 'digit', digits: [1, 2, 3, 4, 5, 6, 7, 8, 9] }
+      ],
+      manualData: [], // 2D array [row][col]
+      cellRandom: {
+        offsetX: [-4.27, 4.94],
+        offsetY: [-0.66, 2.12],
+        scale: [-0.17, 0.21],
+        rotate: [-2.0, 5.5]
+      },
+      charPosRandom: {
+        offsetX: [-1.01, 2.11],
+        offsetY: [-2.2, 0.8],
+        rotate: [-2.5, 2.5],
+        spacing: [-6.0, 4.0]
+      },
+      charShapeRandom: {
+        size: [-0.06, 0.08],
+        bold: [0, 0.35],
+        gray: [0, 18],
+        stretchX: [-0.06, 0.08],
+        stretchY: [-0.06, 0.08]
+      },
+      dotRandom: {
+        offsetY: [-1.2, 1.5],
+        size: [-0.1, 0.25]
+      }
+    }
+  };
+
+  // Undo / Redo History Stack
+  const historyStack = [];
+  let historyIndex = -1;
+  let isRestoringHistory = false;
+
+  function pushHistory() {
+    if (isRestoringHistory) return;
+    const snap = deepClone(state.config);
+    if (historyIndex >= 0 && JSON.stringify(historyStack[historyIndex]) === JSON.stringify(snap)) {
+      return;
+    }
+    historyStack.splice(historyIndex + 1);
+    historyStack.push(snap);
+    if (historyStack.length > 40) historyStack.shift();
+    historyIndex = historyStack.length - 1;
+    updateUndoRedoButtons();
+  }
+
+  function updateUndoRedoButtons() {
+    const btnUndo = document.getElementById('btnUndo');
+    const btnRedo = document.getElementById('btnRedo');
+    if (btnUndo) btnUndo.disabled = historyIndex <= 0;
+    if (btnRedo) btnRedo.disabled = historyIndex >= historyStack.length - 1;
+  }
+
+  function undoConfig() {
+    if (historyIndex > 0) {
+      isRestoringHistory = true;
+      historyIndex--;
+      state.config = deepClone(historyStack[historyIndex]);
+      syncAllControlsFromState();
+      renderCurrentPage();
+      updateUndoRedoButtons();
+      isRestoringHistory = false;
+    }
+  }
+
+  function redoConfig() {
+    if (historyIndex < historyStack.length - 1) {
+      isRestoringHistory = true;
+      historyIndex++;
+      state.config = deepClone(historyStack[historyIndex]);
+      syncAllControlsFromState();
+      renderCurrentPage();
+      updateUndoRedoButtons();
+      isRestoringHistory = false;
+    }
+  }
+
+  // Helper to get active page's startX, startY, rows
+  function getPageGridParams(pageNum = state.currentPage) {
+    const pc = (state.config.pageConfigs && state.config.pageConfigs[String(pageNum)]) || {};
+    return {
+      startX: pc.startX !== undefined ? pc.startX : state.config.startX,
+      startY: pc.startY !== undefined ? pc.startY : state.config.startY,
+      rows: pc.rows !== undefined ? pc.rows : state.config.rows
+    };
+  }
+
+  function setPageGridParam(key, val, pageNum = state.currentPage) {
+    state.config[key] = val;
+    if (!state.config.pageConfigs) state.config.pageConfigs = {};
+    if (!state.config.pageConfigs[String(pageNum)]) {
+      state.config.pageConfigs[String(pageNum)] = {};
+    }
+    state.config.pageConfigs[String(pageNum)][key] = val;
+  }
+
+  // =========================================================================
+  // Generate Realistic Manual Table Data (Vision 4.3-5.1 or Temp 36.1-36.9)
+  // =========================================================================
+  function generateRealisticVisionValue(rng) {
+    // Weighted toward 4.6 - 5.1 just like Screenshot 5 & Screenshot 8
+    const pool = [
+      '5.0', '5.0', '5.0', '5.0', '5.0', '5.1', '5.1',
+      '4.9', '4.9', '4.8', '4.8', '4.7', '4.7',
+      '4.6', '4.6', '4.5', '4.4', '4.3'
+    ];
+    return pool[Math.floor(rng() * pool.length)];
+  }
+
+  function generateRealisticTempValue(rng) {
+    const dec = Math.floor(1 + rng() * 9);
+    return `36.${dec}`;
+  }
+
+  function populateManualTable(mode = 'vision') {
+    const rng = mulberry32(state.globalSeed + 999);
+    const maxR = Math.max(state.config.rows, 60);
+    const maxC = Math.max(state.config.cols, 24);
+    const table = [];
+    for (let r = 0; r < maxR; r++) {
+      const row = [];
+      for (let c = 1; c <= maxC; c++) {
+        const isShown = state.config.activeCols.includes(c);
+        if (!isShown && mode === 'vision') {
+          row.push(rng() < 0.72 ? '是' : '否');
+        } else if (mode === 'vision') {
+          row.push(generateRealisticVisionValue(rng));
+        } else {
+          row.push(generateRealisticTempValue(rng));
+        }
+      }
+      table.push(row);
+    }
+    state.config.manualData = table;
+  }
+
+  // =========================================================================
+  // Dual-Thumb Slider Component Builder
+  // =========================================================================
+  const dualSliderUpdaters = {};
+
+  function buildDualSliderSections() {
+    for (const [sectionKey, schema] of Object.entries(RANDOM_SECTIONS_SCHEMA)) {
+      const mount = document.getElementById(schema.mountId);
+      if (!mount) continue;
+      mount.innerHTML = '';
+      dualSliderUpdaters[sectionKey] = {};
+
+      for (const field of schema.fields) {
+        const group = document.createElement('div');
+        group.className = 'param-group';
+
+        const lbl = document.createElement('span');
+        lbl.className = 'param-label';
+        lbl.textContent = field.label;
+        group.appendChild(lbl);
+
+        const row = document.createElement('div');
+        row.className = 'dual-control-row';
+
+        const leftTag = document.createElement('span');
+        leftTag.className = 'side-tag';
+        leftTag.textContent = field.leftTag;
+
+        const inputMin = document.createElement('input');
+        inputMin.type = 'number';
+        inputMin.className = 'num-input';
+        inputMin.step = String(field.step);
+        inputMin.setAttribute('aria-label', `${field.label}最小值`);
+
+        const dualWrap = document.createElement('div');
+        dualWrap.className = 'dual-slider';
+        const track = document.createElement('div');
+        track.className = 'dual-track';
+        const fill = document.createElement('div');
+        fill.className = 'dual-range-fill';
+        const thumbMin = document.createElement('div');
+        thumbMin.className = 'dual-thumb';
+        const thumbMax = document.createElement('div');
+        thumbMax.className = 'dual-thumb';
+
+        track.appendChild(fill);
+        track.appendChild(thumbMin);
+        track.appendChild(thumbMax);
+        dualWrap.appendChild(track);
+
+        const inputMax = document.createElement('input');
+        inputMax.type = 'number';
+        inputMax.className = 'num-input';
+        inputMax.step = String(field.step);
+        inputMax.setAttribute('aria-label', `${field.label}最大值`);
+
+        const rightTag = document.createElement('span');
+        rightTag.className = 'side-tag';
+        rightTag.textContent = field.rightTag;
+
+        const btnReset = document.createElement('button');
+        btnReset.type = 'button';
+        btnReset.className = 'icon-btn';
+        btnReset.textContent = '↺';
+        btnReset.title = `重置${field.label}`;
+
+        row.append(leftTag, inputMin, dualWrap, inputMax, rightTag, btnReset);
+        group.appendChild(row);
+        mount.appendChild(group);
+
+        const clampVal = (v) => {
+          const n = Number(v);
+          if (Number.isNaN(n)) return 0;
+          return Math.max(field.min, Math.min(field.max, Number(n.toFixed(2))));
+        };
+
+        const updateVisual = () => {
+          const pair = state.config[sectionKey][field.key] || [0, 0];
+          const v0 = clampVal(Math.min(pair[0], pair[1]));
+          const v1 = clampVal(Math.max(pair[0], pair[1]));
+          inputMin.value = String(v0);
+          inputMax.value = String(v1);
+          const p0 = ((v0 - field.min) / (field.max - field.min)) * 100;
+          const p1 = ((v1 - field.min) / (field.max - field.min)) * 100;
+          fill.style.left = `${p0}%`;
+          fill.style.width = `${Math.max(0, p1 - p0)}%`;
+          thumbMin.style.left = `${p0}%`;
+          thumbMax.style.left = `${p1}%`;
+        };
+
+        dualSliderUpdaters[sectionKey][field.key] = updateVisual;
+
+        inputMin.addEventListener('change', () => {
+          const v0 = clampVal(inputMin.value);
+          const v1 = clampVal(state.config[sectionKey][field.key][1]);
+          state.config[sectionKey][field.key] = [Math.min(v0, v1), Math.max(v0, v1)];
+          updateVisual();
+          pushHistory();
+          renderCurrentPage();
+        });
+
+        inputMax.addEventListener('change', () => {
+          const v0 = clampVal(state.config[sectionKey][field.key][0]);
+          const v1 = clampVal(inputMax.value);
+          state.config[sectionKey][field.key] = [Math.min(v0, v1), Math.max(v0, v1)];
+          updateVisual();
+          pushHistory();
+          renderCurrentPage();
+        });
+
+        btnReset.addEventListener('click', () => {
+          state.config[sectionKey][field.key] = [0, 0];
+          updateVisual();
+          pushHistory();
+          renderCurrentPage();
+        });
+
+        // Pointer dragging on dual slider
+        let activeThumb = null;
+        dualWrap.addEventListener('pointerdown', (e) => {
+          e.preventDefault();
+          dualWrap.setPointerCapture(e.pointerId);
+          const rect = track.getBoundingClientRect();
+          const ratio = Math.max(0, Math.min(1, (e.clientX - rect.left) / rect.width));
+          const clickVal = field.min + ratio * (field.max - field.min);
+          const [cur0, cur1] = state.config[sectionKey][field.key];
+          if (Math.abs(clickVal - cur0) <= Math.abs(clickVal - cur1)) {
+            activeThumb = 'min';
+            thumbMin.classList.add('dragging');
+          } else {
+            activeThumb = 'max';
+            thumbMax.classList.add('dragging');
+          }
+          onMove(e);
+        });
+
+        const onMove = (e) => {
+          if (!activeThumb) return;
+          const rect = track.getBoundingClientRect();
+          const ratio = Math.max(0, Math.min(1, (e.clientX - rect.left) / rect.width));
+          const rawVal = field.min + ratio * (field.max - field.min);
+          const stepped = Math.round(rawVal / field.step) * field.step;
+          const val = clampVal(stepped);
+          let [v0, v1] = state.config[sectionKey][field.key];
+          if (activeThumb === 'min') {
+            v0 = Math.min(val, v1);
+          } else {
+            v1 = Math.max(val, v0);
+          }
+          state.config[sectionKey][field.key] = [v0, v1];
+          updateVisual();
+          renderCurrentPage();
+        };
+
+        dualWrap.addEventListener('pointermove', onMove);
+        const endDrag = () => {
+          if (!activeThumb) return;
+          activeThumb = null;
+          thumbMin.classList.remove('dragging');
+          thumbMax.classList.remove('dragging');
+          pushHistory();
+        };
+        dualWrap.addEventListener('pointerup', endDrag);
+        dualWrap.addEventListener('pointercancel', endDrag);
+
+        updateVisual();
+      }
+    }
+  }
+
+  // =========================================================================
+  // Sync Left Sidebar Controls <-> State
+  // =========================================================================
+  function renderColsCheckGrid() {
+    const grid = document.getElementById('colsCheckGrid');
+    if (!grid) return;
+    grid.innerHTML = '';
+    const totalCols = state.config.cols;
+    for (let c = 1; c <= totalCols; c++) {
+      const lbl = document.createElement('label');
+      lbl.className = 'col-check-item';
+      const chk = document.createElement('input');
+      chk.type = 'checkbox';
+      chk.checked = state.config.activeCols.includes(c);
+      chk.addEventListener('change', () => {
+        if (chk.checked) {
+          if (!state.config.activeCols.includes(c)) {
+            state.config.activeCols.push(c);
+            state.config.activeCols.sort((a, b) => a - b);
+          }
+        } else {
+          state.config.activeCols = state.config.activeCols.filter((x) => x !== c);
+        }
+        pushHistory();
+        renderCurrentPage();
+      });
+      const sp = document.createElement('span');
+      sp.textContent = `第${c}列`;
+      lbl.append(chk, sp);
+      grid.appendChild(lbl);
+    }
+  }
+
+  let editingSlotIndex = -1;
+
+  function renderDigitSlotsUI() {
+    const list = document.getElementById('digitSlotsList');
+    if (!list) return;
+    list.innerHTML = '';
+    state.config.digitSlots.forEach((slot, idx) => {
+      const card = document.createElement('div');
+      card.className = 'digit-slot-card';
+      card.title = '双击编辑此数位的候选数字';
+
+      const delBtn = document.createElement('button');
+      delBtn.type = 'button';
+      delBtn.className = 'slot-del-btn';
+      delBtn.textContent = '✕';
+      delBtn.title = '删除此数位';
+      delBtn.addEventListener('click', (e) => {
+        e.stopPropagation();
+        if (state.config.digitSlots.length <= 1) return;
+        state.config.digitSlots.splice(idx, 1);
+        renderDigitSlotsUI();
+        pushHistory();
+        renderCurrentPage();
+      });
+
+      const nameEl = document.createElement('div');
+      nameEl.className = 'slot-name';
+      if (slot.type === 'dot') {
+        nameEl.textContent = '小数点';
+      } else {
+        nameEl.innerHTML = '随机<br>数字';
+      }
+
+      const subEl = document.createElement('div');
+      subEl.className = 'slot-sub';
+      if (slot.type === 'dot') {
+        subEl.textContent = '( . )';
+      } else {
+        const d = slot.digits || [];
+        const summary = d.length === 1 ? `[${d[0]}]` : d.length >= 9 ? `[0-9]` : `[${d.slice(0, 3).join(',')}…]`;
+        subEl.textContent = `(双击编辑 ${summary})`;
+      }
+
+      card.append(delBtn, nameEl, subEl);
+      card.addEventListener('dblclick', () => openEditSlotModal(idx));
+      card.addEventListener('click', () => openEditSlotModal(idx));
+      list.appendChild(card);
+    });
+  }
+
+  function openEditSlotModal(idx) {
+    editingSlotIndex = idx;
+    const slot = state.config.digitSlots[idx];
+    if (!slot) return;
+    const dialog = document.getElementById('dialogEditSlot');
+    const typeSelect = document.getElementById('slotTypeSelect');
+    const digitsWrap = document.getElementById('slotDigitsWrap');
+    const checksGrid = document.getElementById('slotDigitChecks');
+
+    typeSelect.value = slot.type;
+    digitsWrap.hidden = slot.type === 'dot';
+
+    checksGrid.innerHTML = '';
+    for (let d = 0; d <= 9; d++) {
+      const lbl = document.createElement('label');
+      lbl.className = 'digit-check-label';
+      const chk = document.createElement('input');
+      chk.type = 'checkbox';
+      chk.value = String(d);
+      chk.checked = (slot.digits || []).includes(d);
+      const sp = document.createElement('span');
+      sp.textContent = String(d);
+      lbl.append(chk, sp);
+      checksGrid.appendChild(lbl);
+    }
+
+    dialog.showModal();
+  }
+
+  function syncAllControlsFromState() {
+    const pg = getPageGridParams();
+    const bindPair = (rngId, numId, val) => {
+      const r = document.getElementById(rngId);
+      const n = document.getElementById(numId);
+      if (r) {
+        r.value = String(val);
+        syncNativeSlider(r);
+      }
+      if (n) n.value = String(val);
+    };
+
+    bindPair('rngStartX', 'numStartX', pg.startX);
+    bindPair('rngStartY', 'numStartY', pg.startY);
+    bindPair('rngColWidth', 'numColWidth', state.config.colWidth);
+    bindPair('rngRowHeight', 'numRowHeight', state.config.rowHeight);
+    bindPair('rngCellPad', 'numCellPad', state.config.cellPad);
+    bindPair('rngRows', 'numRows', pg.rows);
+    bindPair('rngCols', 'numCols', state.config.cols);
+
+    renderColsCheckGrid();
+    renderDigitSlotsUI();
+
+    const isManual = state.config.fillMode === 'manual';
+    document.getElementById('tabFillRandom').classList.toggle('active', !isManual);
+    document.getElementById('tabFillManual').classList.toggle('active', isManual);
+    document.getElementById('panelFillRandom').hidden = isManual;
+    document.getElementById('panelFillManual').hidden = !isManual;
+
+    for (const [secKey, map] of Object.entries(dualSliderUpdaters)) {
+      for (const fn of Object.values(map)) fn();
+    }
+  }
+
+  // =========================================================================
+  // Core Handwriting Canvas Renderer (Ultra-Realistic Multi-Glyph Engine)
+  // =========================================================================
+  function getCellText(pageNum, rowIdx, colIdx1Based, rng) {
+    if (state.config.fillMode === 'manual') {
+      const rowArr = state.config.manualData[rowIdx];
+      if (rowArr && rowArr[colIdx1Based - 1] !== undefined) {
+        return String(rowArr[colIdx1Based - 1]).trim();
+      }
+      return generateRealisticVisionValue(rng);
+    }
+    if (state.config.visionPreset) {
+      return generateRealisticVisionValue(rng);
+    }
+    // Build from digitSlots
+    let out = '';
+    for (const slot of state.config.digitSlots) {
+      if (slot.type === 'dot') {
+        out += '.';
+      } else {
+        const pool = slot.digits && slot.digits.length ? slot.digits : [0];
+        const pick = pool[Math.floor(rng() * pool.length)];
+        out += String(pick);
+      }
+    }
+    return out;
+  }
+
+  function drawHandwrittenString(ctx, text, cellCenterX, cellCenterY, colWidthPx, rowHeightPx, rng, allowScratch) {
+    const font = fontsRegistry[activeFontIndex];
+    if (!font || !text) return;
+
+    const cfg = state.config;
+    ctx.save();
+
+    // 1. Cell-level random offset (in mm/px scale), scale, and rotation
+    const cellDx = randRange(rng, cfg.cellRandom.offsetX) * 2.2;
+    const cellDy = randRange(rng, cfg.cellRandom.offsetY) * 2.2;
+    const cellScale = Math.max(0.45, 1 + randRange(rng, cfg.cellRandom.scale));
+    const cellRotDeg = randRange(rng, cfg.cellRandom.rotate);
+
+    ctx.translate(cellCenterX + cellDx, cellCenterY + cellDy);
+    ctx.rotate((cellRotDeg * Math.PI) / 180);
+    ctx.scale(cellScale, cellScale);
+
+    // Check if this cell triggers a realistic human scratch-out & rewrite (~1.4% probability when enabled)
+    const doScratch = allowScratch && state.scratchEffect && rng() < 0.014 && text.length >= 3;
+    if (doScratch) {
+      // Shift slightly left, draw a mistaken value, strike it out with 2 pen slashes, then draw real value on right
+      ctx.save();
+      ctx.translate(-colWidthPx * 0.22, 0);
+      ctx.scale(0.84, 0.84);
+      const wrongLast = String(Math.floor(1 + rng() * 9));
+      const wrongText = text.slice(0, -1) + wrongLast;
+      drawCharactersSequence(ctx, font, wrongText, rowHeightPx, rng);
+      // Draw realistic pen scratch lines over the mistake
+      ctx.strokeStyle = 'rgba(22, 22, 22, 0.88)';
+      ctx.lineWidth = 1.9;
+      ctx.lineCap = 'round';
+      for (let s = 0; s < 3; s++) {
+        ctx.beginPath();
+        ctx.moveTo(-16 + s * 3, -8 + rng() * 5);
+        ctx.lineTo(18 - s * 2, 9 - rng() * 4);
+        ctx.stroke();
+      }
+      ctx.restore();
+      ctx.translate(colWidthPx * 0.24, (rng() - 0.5) * 3);
+      ctx.scale(0.9, 0.9);
+    }
+
+    drawCharactersSequence(ctx, font, text, rowHeightPx, rng);
+    ctx.restore();
+  }
+
+  function drawCharactersSequence(ctx, font, text, rowHeightPx, rng) {
+    const cfg = state.config;
+    const chars = Array.from(text);
+    const baseDigitHeight = rowHeightPx * 0.56;
+    const naturalScale = baseDigitHeight / 26.0;
+
+    // Pre-pick glyphs and compute total width so we can center around cell origin + cellPad
+    const pickedItems = [];
+    let totalAdvance = 0;
+
+    for (let i = 0; i < chars.length; i++) {
+      const ch = chars[i];
+      const variants = font.glyphs[ch];
+      if (!variants || variants.length === 0) continue;
+      const g = variants[Math.floor(rng() * variants.length)];
+
+      const isDot = ch === '.';
+      let normScale = naturalScale;
+      if (state.normalizeFontSize) {
+        if (isDot) {
+          normScale = (baseDigitHeight * 0.22) / Math.max(6, g.h);
+        } else {
+          const targetH = ch === '0' ? baseDigitHeight * 0.68 : baseDigitHeight * 0.84;
+          const fullNorm = targetH / Math.max(12, g.h);
+          normScale = naturalScale * 0.22 + fullNorm * 0.78;
+        }
+      }
+
+      const charScale = Math.max(0.4, 1 + randRange(rng, cfg.charShapeRandom.size));
+      const dotExtraScale = isDot ? Math.max(0.4, 1 + randRange(rng, cfg.dotRandom.size)) : 1.0;
+      const stretchX = Math.max(0.5, 1 + randRange(rng, cfg.charShapeRandom.stretchX));
+      const stretchY = Math.max(0.5, 1 + randRange(rng, cfg.charShapeRandom.stretchY));
+
+      const finalScaleX = normScale * charScale * dotExtraScale * stretchX;
+      const finalScaleY = normScale * charScale * dotExtraScale * stretchY;
+      const drawW = g.w * finalScaleX;
+      const drawH = g.h * finalScaleY;
+
+      const kerning = isDot ? 0 : randRange(rng, cfg.charPosRandom.spacing) * 0.45;
+      const advance = (isDot ? Math.max(5.5, drawW * 0.85) : drawW * 0.88 + 1.2) + kerning;
+
+      pickedItems.push({
+        ch,
+        isDot,
+        g,
+        drawW,
+        drawH,
+        advance,
+        dx: randRange(rng, cfg.charPosRandom.offsetX) * 0.9,
+        dy: randRange(rng, cfg.charPosRandom.offsetY) * 0.8 + (isDot ? randRange(rng, cfg.dotRandom.offsetY) * 1.1 : 0),
+        rotDeg: isDot ? 0 : randRange(rng, cfg.charPosRandom.rotate),
+        bold: randRange(rng, cfg.charShapeRandom.bold),
+        gray: randRange(rng, cfg.charShapeRandom.gray)
+      });
+      totalAdvance += advance;
+    }
+
+    let cursorX = -totalAdvance / 2 + cfg.cellPad * PX_PER_CM * 0.5;
+
+    for (const item of pickedItems) {
+      ctx.save();
+      const cx = cursorX + item.advance / 2 + item.dx;
+      const cy = item.isDot
+        ? baseDigitHeight * 0.26 + item.dy
+        : item.dy;
+
+      ctx.translate(cx, cy);
+      if (item.rotDeg) {
+        ctx.rotate((item.rotDeg * Math.PI) / 180);
+      }
+
+      const alphaFactor = Math.max(0.45, 1 - item.gray / 115);
+      ctx.globalAlpha = alphaFactor;
+
+      ctx.drawImage(item.g.img, -item.drawW / 2, -item.drawH / 2, item.drawW, item.drawH);
+
+      if (item.bold > 0.08) {
+        const offsetPx = Math.min(1.4, item.bold * 1.0);
+        ctx.globalAlpha = alphaFactor * Math.min(0.7, item.bold * 0.6);
+        ctx.drawImage(item.g.img, -item.drawW / 2 + offsetPx, -item.drawH / 2, item.drawW, item.drawH);
+      }
+
+      ctx.restore();
+      cursorX += item.advance;
+    }
+  }
+
+  function renderPageToCanvas(pageIndex1Based, targetCanvas, seedOffset = 0) {
+    const pageObj = state.pages[pageIndex1Based - 1];
+    if (!pageObj) return;
+
+    targetCanvas.width = pageObj.width;
+    targetCanvas.height = pageObj.height;
+    const ctx = targetCanvas.getContext('2d');
+    ctx.clearRect(0, 0, targetCanvas.width, targetCanvas.height);
+
+    // 1. Draw underlying empty PDF page image
+    if (pageObj.img) {
+      ctx.drawImage(pageObj.img, 0, 0, pageObj.width, pageObj.height);
+    } else {
+      ctx.fillStyle = '#ffffff';
+      ctx.fillRect(0, 0, pageObj.width, pageObj.height);
+    }
+
+    // 2. Draw handwritten numbers in each active cell
+    const pg = getPageGridParams(pageIndex1Based);
+    const startXPx = pg.startX * PX_PER_CM;
+    const startYPx = pg.startY * PX_PER_CM;
+    const colWidthPx = state.config.colWidth * PX_PER_CM;
+    const rowHeightPx = state.config.rowHeight * PX_PER_CM;
+    const rows = pg.rows;
+    const cols = state.config.cols;
+
+    for (let r = 0; r < rows; r++) {
+      const cellCenterY = startYPx + (r + 0.5) * rowHeightPx;
+      for (let c = 1; c <= cols; c++) {
+        if (!state.config.activeCols.includes(c)) continue;
+        const customColOffsetCm = (state.config.colOffsets && state.config.colOffsets[String(c)]) || 0;
+        const colLeftPx = startXPx + (c - 1) * colWidthPx + customColOffsetCm * PX_PER_CM;
+        const cellCenterX = colLeftPx + colWidthPx * 0.5;
+
+        const cellSeed =
+          state.globalSeed +
+          seedOffset * 100003 +
+          pageIndex1Based * 10007 +
+          r * 313 +
+          c * 37;
+        const rng = mulberry32(cellSeed);
+        const text = getCellText(pageIndex1Based, r, c, rng);
+        drawHandwrittenString(ctx, text, cellCenterX, cellCenterY, colWidthPx, rowHeightPx, rng, true);
+      }
+    }
+  }
+
+  function renderCurrentPage() {
+    const canvas = document.getElementById('pdfRenderCanvas');
+    if (!canvas || !state.pages.length) return;
+    renderPageToCanvas(state.currentPage, canvas, 0);
+    updateStageOverlayHandles();
+    updateStageTransform();
+  }
+
+  // =========================================================================
+  // Interactive Stage Overlay Handles (Origin, Blue Column Guides, Green Rulers)
+  // =========================================================================
+  function updateStageOverlayHandles() {
+    const overlay = document.getElementById('stageOverlay');
+    if (!overlay || !state.pages.length) return;
+    overlay.classList.toggle('hidden', state.hideLegend);
+
+    const pg = getPageGridParams(state.currentPage);
+    const startXPx = pg.startX * PX_PER_CM;
+    const startYPx = pg.startY * PX_PER_CM;
+    const colWidthPx = state.config.colWidth * PX_PER_CM;
+    const rowHeightPx = state.config.rowHeight * PX_PER_CM;
+
+    // 1. Red Origin Handle
+    const originHandle = document.getElementById('originHandle');
+    originHandle.style.left = `${startXPx}px`;
+    originHandle.style.top = `${startYPx}px`;
+
+    // 2. Blue Column Guides for active columns
+    const guidesContainer = document.getElementById('colGuidesContainer');
+    guidesContainer.innerHTML = '';
+    const tableHeightPx = pg.rows * rowHeightPx;
+
+    for (let c = 1; c <= state.config.cols; c++) {
+      if (!state.config.activeCols.includes(c)) continue;
+      const customOffsetCm = (state.config.colOffsets && state.config.colOffsets[String(c)]) || 0;
+      const colX = startXPx + (c - 1) * colWidthPx + customOffsetCm * PX_PER_CM;
+
+      const line = document.createElement('div');
+      line.className = 'col-guide-line';
+      line.style.left = `${colX}px`;
+      line.style.top = `${startYPx - 24}px`;
+      line.style.height = `${tableHeightPx + 24}px`;
+
+      const badge = document.createElement('div');
+      badge.className = 'col-guide-badge';
+      badge.textContent = '点击拖动';
+      line.appendChild(badge);
+
+      // Dragging individual blue column guide adjusts custom column offset (or startX for col 1)
+      line.addEventListener('pointerdown', (e) => {
+        e.stopPropagation();
+        e.preventDefault();
+        line.setPointerCapture(e.pointerId);
+        const startClientX = e.clientX;
+        const scale = state.zoom / 100;
+        const initStartX = pg.startX;
+        const initCustom = (state.config.colOffsets && state.config.colOffsets[String(c)]) || 0;
+
+        const onMove = (ev) => {
+          const dxCm = (ev.clientX - startClientX) / (PX_PER_CM * scale);
+          if (c === 1) {
+            setPageGridParam('startX', Number(Math.max(0.2, initStartX + dxCm).toFixed(2)));
+          } else {
+            if (!state.config.colOffsets) state.config.colOffsets = {};
+            state.config.colOffsets[String(c)] = Number((initCustom + dxCm).toFixed(2));
+          }
+          syncAllControlsFromState();
+          renderCurrentPage();
+        };
+        const onUp = () => {
+          line.removeEventListener('pointermove', onMove);
+          line.removeEventListener('pointerup', onUp);
+          pushHistory();
+        };
+        line.addEventListener('pointermove', onMove);
+        line.addEventListener('pointerup', onUp);
+      });
+
+      guidesContainer.appendChild(line);
+    }
+
+    // 3. Green Column Width Ruler & Row Height Ruler
+    const colRuler = document.getElementById('colWidthRuler');
+    const colRulerLine = document.getElementById('colWidthRulerLine');
+    const colRulerTag = document.getElementById('colWidthRulerTag');
+    colRuler.hidden = !state.showColRuler;
+    colRuler.style.left = `${startXPx}px`;
+    colRuler.style.top = `${startYPx + rowHeightPx * 2}px`;
+    colRulerLine.style.width = `${colWidthPx}px`;
+    colRulerTag.textContent = `列宽 ${state.config.colWidth.toFixed(2)} cm`;
+
+    const rowRuler = document.getElementById('rowHeightRuler');
+    const rowRulerLine = document.getElementById('rowHeightRulerLine');
+    const rowRulerTag = document.getElementById('rowHeightRulerTag');
+    rowRuler.hidden = !state.showRowRuler;
+    rowRuler.style.left = `${startXPx + colWidthPx * 0.5}px`;
+    rowRuler.style.top = `${startYPx + rowHeightPx * 3}px`;
+    rowRulerLine.style.height = `${rowHeightPx}px`;
+    rowRulerTag.textContent = `行高 ${state.config.rowHeight.toFixed(2)} cm`;
+  }
+
+  function updateStageTransform() {
+    const stage = document.getElementById('canvasStage');
+    if (!stage) return;
+    const scale = state.zoom / 100;
+    stage.style.transform = `translate(${state.panX}px, ${state.panY}px) scale(${scale})`;
+    const zoomLbl = document.getElementById('zoomLabel');
+    const zoomSlider = document.getElementById('zoomSlider');
+    if (zoomLbl) zoomLbl.textContent = `${Math.round(state.zoom)}%`;
+    if (zoomSlider) {
+      zoomSlider.value = String(Math.round(state.zoom));
+      syncNativeSlider(zoomSlider);
+    }
+  }
+
+  function fitPageToViewport() {
+    const viewport = document.getElementById('canvasViewport');
+    const pageObj = state.pages[state.currentPage - 1];
+    if (!viewport || !pageObj) return;
+    const isLandscape = pageObj.width > pageObj.height;
+    state.zoom = isLandscape ? 118 : 128;
+    state.panX = -32;
+    state.panY = -42;
+    updateStageTransform();
+  }
+
+  // =========================================================================
+  // Loading Examples, Custom PDFs, and Project JSON
+  // =========================================================================
+  async function loadExample(exampleKey) {
+    const ex = window.HANDWRITE_EXAMPLES && window.HANDWRITE_EXAMPLES[exampleKey];
+    if (!ex) return;
+
+    const loadedPages = [];
+    for (const p of ex.pages) {
+      const img = await new Promise((resolve) => {
+        const im = new Image();
+        im.onload = () => resolve(im);
+        im.src = p.src;
+      });
+      loadedPages.push({
+        width: p.width,
+        height: p.height,
+        widthCm: p.widthCm,
+        heightCm: p.heightCm,
+        img
+      });
+    }
+
+    state.pages = loadedPages;
+    state.currentPage = 1;
+    state.projectPath = ex.path;
+    state.config = deepClone(ex.config);
+    state.config.colOffsets = {};
+
+    if (ex.config.fillMode === 'manual') {
+      populateManualTable('vision');
+    } else {
+      populateManualTable('temp');
+    }
+
+    showWorkspaceView();
+    refreshPageNavUI();
+    syncAllControlsFromState();
+    historyStack.length = 0;
+    historyIndex = -1;
+    pushHistory();
+    requestAnimationFrame(() => {
+      fitPageToViewport();
+      renderCurrentPage();
+    });
+  }
+
+  async function loadUserPdfFile(file) {
+    if (!file || !window.pdfjsLib) return;
+    const buf = await file.arrayBuffer();
+    const pdfDoc = await window.pdfjsLib.getDocument({ data: buf }).promise;
+    const loadedPages = [];
+
+    for (let i = 1; i <= pdfDoc.numPages; i++) {
+      const page = await pdfDoc.getPage(i);
+      const vp1 = page.getViewport({ scale: 1 });
+      // Standard PDF point is 1/72 inch; 1 inch = 2.54 cm -> scale to PX_PER_CM (60 px/cm)
+      const scale = (PX_PER_CM * 2.54) / 72;
+      const vp = page.getViewport({ scale });
+      const offCanvas = document.createElement('canvas');
+      offCanvas.width = Math.round(vp.width);
+      offCanvas.height = Math.round(vp.height);
+      const offCtx = offCanvas.getContext('2d');
+      await page.render({ canvasContext: offCtx, viewport: vp }).promise;
+
+      const dataUrl = offCanvas.toDataURL('image/png');
+      const img = await new Promise((resolve) => {
+        const im = new Image();
+        im.onload = () => resolve(im);
+        im.src = dataUrl;
+      });
+      loadedPages.push({
+        width: offCanvas.width,
+        height: offCanvas.height,
+        widthCm: Number((offCanvas.width / PX_PER_CM).toFixed(2)),
+        heightCm: Number((offCanvas.height / PX_PER_CM).toFixed(2)),
+        img
+      });
+    }
+
+    state.pages = loadedPages;
+    state.currentPage = 1;
+    state.projectPath = file.name;
+    showWorkspaceView();
+    refreshPageNavUI();
+    syncAllControlsFromState();
+    pushHistory();
+    requestAnimationFrame(() => {
+      fitPageToViewport();
+      renderCurrentPage();
+    });
+  }
+
+  function refreshPageNavUI() {
+    const sel = document.getElementById('pageSelect');
+    const totalTxt = document.getElementById('totalPagesText');
+    const prevBtn = document.getElementById('btnPrevPage');
+    const nextBtn = document.getElementById('btnNextPage');
+    const statusTxt = document.getElementById('statusBarText');
+
+    const total = state.pages.length || 1;
+    sel.innerHTML = '';
+    for (let i = 1; i <= total; i++) {
+      const opt = document.createElement('option');
+      opt.value = String(i);
+      opt.textContent = String(i);
+      sel.appendChild(opt);
+    }
+    sel.value = String(state.currentPage);
+    totalTxt.textContent = `/ ${total} 页`;
+    prevBtn.disabled = state.currentPage <= 1;
+    nextBtn.disabled = state.currentPage >= total;
+    if (statusTxt) {
+      statusTxt.textContent = `项目已加载: ${state.projectPath}`;
+    }
+  }
+
+  // =========================================================================
+  // View Switching (Home / Workspace / Font Maker)
+  // =========================================================================
+  function showHomeView() {
+    document.getElementById('homeView').hidden = false;
+    document.getElementById('workspaceView').hidden = true;
+    document.getElementById('fontMakerView').hidden = true;
+    document.getElementById('windowTitlebar').classList.remove('dark');
+    document.getElementById('windowTitleText').textContent = '手写数字生成器';
+    document.getElementById('tabMainApp').classList.add('active');
+    document.getElementById('tabFontMaker').classList.remove('active');
+  }
+
+  function showWorkspaceView() {
+    document.getElementById('homeView').hidden = true;
+    document.getElementById('workspaceView').hidden = false;
+    document.getElementById('fontMakerView').hidden = true;
+    document.getElementById('windowTitlebar').classList.remove('dark');
+    document.getElementById('windowTitleText').textContent = '手写数字生成器';
+    document.getElementById('tabMainApp').classList.add('active');
+    document.getElementById('tabFontMaker').classList.remove('active');
+  }
+
+  function showFontMakerView() {
+    document.getElementById('homeView').hidden = true;
+    document.getElementById('workspaceView').hidden = true;
+    document.getElementById('fontMakerView').hidden = false;
+    document.getElementById('windowTitlebar').classList.add('dark');
+    document.getElementById('windowTitleText').textContent = '字体制作器';
+    document.getElementById('tabMainApp').classList.remove('active');
+    document.getElementById('tabFontMaker').classList.add('active');
+  }
+
+  // =========================================================================
+  // Manual Input Spreadsheet Modal (Screenshot 8)
+  // =========================================================================
+  function openManualInputModal() {
+    const dialog = document.getElementById('dialogManualInput');
+    const tableEl = document.getElementById('manualGridTable');
+    const pg = getPageGridParams();
+    const rows = pg.rows;
+    const cols = state.config.cols;
+
+    if (!state.config.manualData || state.config.manualData.length < rows) {
+      populateManualTable(state.config.visionPreset ? 'vision' : 'temp');
+    }
+
+    tableEl.innerHTML = '';
+    const thead = document.createElement('thead');
+    const trHead = document.createElement('tr');
+    const thCorner = document.createElement('th');
+    thCorner.textContent = '';
+    trHead.appendChild(thCorner);
+
+    for (let c = 1; c <= cols; c++) {
+      const th = document.createElement('th');
+      const isShown = state.config.activeCols.includes(c);
+      th.className = isShown ? '' : 'unshown';
+      th.textContent = isShown ? `第${c}列` : `第${c}列 (未显示)`;
+      trHead.appendChild(th);
+    }
+    thead.appendChild(trHead);
+    tableEl.appendChild(thead);
+
+    const tbody = document.createElement('tbody');
+    for (let r = 0; r < rows; r++) {
+      const tr = document.createElement('tr');
+      const tdRow = document.createElement('td');
+      tdRow.className = 'row-hdr';
+      tdRow.textContent = `第${r + 1}行`;
+      tr.appendChild(tdRow);
+
+      if (!state.config.manualData[r]) state.config.manualData[r] = [];
+      for (let c = 1; c <= cols; c++) {
+        const isShown = state.config.activeCols.includes(c);
+        const td = document.createElement('td');
+        td.className = isShown ? '' : 'unshown';
+        const inp = document.createElement('input');
+        inp.type = 'text';
+        inp.className = 'manual-cell-input';
+        inp.value = state.config.manualData[r][c - 1] ?? '5.0';
+        inp.dataset.r = String(r);
+        inp.dataset.c = String(c - 1);
+        td.appendChild(inp);
+        tr.appendChild(td);
+      }
+      tbody.appendChild(tr);
+    }
+    tableEl.appendChild(tbody);
+    if (!dialog.open) dialog.showModal();
+  }
+
+  function saveManualModalChanges() {
+    const tableEl = document.getElementById('manualGridTable');
+    tableEl.querySelectorAll('.manual-cell-input').forEach((inp) => {
+      const r = Number(inp.dataset.r);
+      const c = Number(inp.dataset.c);
+      if (!state.config.manualData[r]) state.config.manualData[r] = [];
+      state.config.manualData[r][c] = inp.value.trim();
+    });
+    state.config.fillMode = 'manual';
+    syncAllControlsFromState();
+    pushHistory();
+    renderCurrentPage();
+    document.getElementById('dialogManualInput').close();
+  }
+
+  // =========================================================================
+  // Multi-Page PDF Export with Live Progress Bar (Video 0:47-0:49)
+  // =========================================================================
+  function openExportModal() {
+    const dialog = document.getElementById('dialogExportPdf');
+    const copiesInp = document.getElementById('exportCopiesInput');
+    const hint = document.getElementById('exportTotalPagesHint');
+    document.getElementById('exportConfigSection').hidden = false;
+    document.getElementById('exportProgressSection').hidden = true;
+
+    const updateHint = () => {
+      const copies = Math.max(1, Number(copiesInp.value) || 1);
+      const total = copies * (state.pages.length || 1);
+      hint.textContent = `共导出 ${total} 页 PDF`;
+    };
+    copiesInp.oninput = updateHint;
+    updateHint();
+    dialog.showModal();
+  }
+
+  async function runPdfExport() {
+    const copies = Math.max(1, Math.min(50, Number(document.getElementById('exportCopiesInput').value) || 1));
+    const printAfter = document.getElementById('chkExportPrintAfter').checked;
+    const pageCountPerCopy = state.pages.length || 1;
+    const totalExportPages = copies * pageCountPerCopy;
+
+    document.getElementById('exportConfigSection').hidden = true;
+    const progSec = document.getElementById('exportProgressSection');
+    const progLbl = document.getElementById('exportProgressLabel');
+    const progBar = document.getElementById('exportProgressBar');
+    const progPct = document.getElementById('exportProgressPct');
+    progSec.hidden = false;
+
+    const { jsPDF } = window.jspdf;
+    const firstPage = state.pages[0];
+    const isLandscape = firstPage.width > firstPage.height;
+    const doc = new jsPDF({
+      orientation: isLandscape ? 'landscape' : 'portrait',
+      unit: 'cm',
+      format: [firstPage.widthCm, firstPage.heightCm]
+    });
+
+    const offCanvas = document.createElement('canvas');
+    let generated = 0;
+
+    for (let copyIdx = 0; copyIdx < copies; copyIdx++) {
+      for (let pIdx = 1; pIdx <= pageCountPerCopy; pIdx++) {
+        generated++;
+        const pct = Math.round((generated / totalExportPages) * 100);
+        progLbl.textContent = `正在生成 PDF... ${generated}/${totalExportPages} 页`;
+        progBar.value = pct;
+        progPct.textContent = `${pct}%`;
+
+        // Allow UI to repaint progress bar
+        await new Promise((r) => setTimeout(r, 45));
+
+        const pObj = state.pages[pIdx - 1];
+        if (generated > 1) {
+          const orient = pObj.width > pObj.height ? 'landscape' : 'portrait';
+          doc.addPage([pObj.widthCm, pObj.heightCm], orient);
+        }
+
+        renderPageToCanvas(pIdx, offCanvas, copyIdx);
+        const imgData = offCanvas.toDataURL('image/jpeg', 0.94);
+        doc.addImage(imgData, 'JPEG', 0, 0, pObj.widthCm, pObj.heightCm);
+      }
+    }
+
+    const baseName = (state.projectPath || '手写数字表格').split(/[\\/]/).pop().replace(/\.pdf$/i, '');
+    doc.save(`${baseName}_手写生成_${totalExportPages}页.pdf`);
+
+    document.getElementById('dialogExportPdf').close();
+    if (printAfter) {
+      const pdfBlobUrl = doc.output('bloburl');
+      window.open(pdfBlobUrl, '_blank');
+    }
+  }
+
+  // =========================================================================
+  // MODULE A: 字体制作器 (Font Maker - 3-Step Pipeline, Screenshots 10-13)
+  // =========================================================================
+  const CATEGORY_COLORS = {
+    '1': '#d97706',
+    '2': '#b4831e',
+    '3': '#4d8b31',
+    '4': '#1f9d55',
+    '5': '#15803d',
+    '6': '#2563eb',
+    '7': '#4f46e5',
+    '8': '#7c3aed',
+    '9': '#9333ea',
+    '0': '#dc2626',
+    '.': '#db2777'
+  };
+  const CATEGORY_ORDER = ['1', '2', '3', '4', '5', '6', '7', '8', '9', '0', '.'];
+
+  const fmState = {
+    step: 0, // 0=welcome, 1=threshold, 2=boxes, 3=label
+    sourceImg: null,
+    grayArr: null,
+    bgArr: null,
+    alphaArr: null,
+    width: 0,
+    height: 0,
+    tolerance: 29,
+    zoom: 100,
+    panX: 40,
+    panY: 20,
+    boxes: [], // [{ x, y, w, h, label: null | '1'..'9'|'0'|'.' }]
+    history: [],
+    historyIdx: -1,
+    activeLabelCat: '1',
+    selectedBoxIdx: -1,
+    contextBoxIdx: -1,
+    marquee: null // { x0, y0, x1, y1 }
+  };
+
+  function showNoticeDialog(title, msg) {
+    const dlg = document.getElementById('dialogNotice');
+    document.getElementById('dialogNoticeTitle').textContent = title;
+    document.getElementById('dialogNoticeMessage').textContent = msg;
+    dlg.showModal();
+  }
+
+  function fmPushHistory() {
+    const snap = deepClone(fmState.boxes);
+    fmState.history.splice(fmState.historyIdx + 1);
+    fmState.history.push(snap);
+    fmState.historyIdx = fmState.history.length - 1;
+    document.getElementById('btnFmUndo').disabled = fmState.historyIdx <= 0;
+    document.getElementById('btnFmRedo').disabled = fmState.historyIdx >= fmState.history.length - 1;
+  }
+
+  // Fast Integral-Image Box Blur for Local Adaptive Background Estimation
+  function computeBoxBlurGray(gray, w, h, radius) {
+    const integral = new Float64Array((w + 1) * (h + 1));
+    for (let y = 0; y < h; y++) {
+      let rowSum = 0;
+      for (let x = 0; x < w; x++) {
+        rowSum += gray[y * w + x];
+        integral[(y + 1) * (w + 1) + (x + 1)] = integral[y * (w + 1) + (x + 1)] + rowSum;
+      }
+    }
+    const out = new Float32Array(w * h);
+    for (let y = 0; y < h; y++) {
+      const y0 = Math.max(0, y - radius);
+      const y1 = Math.min(h - 1, y + radius);
+      for (let x = 0; x < w; x++) {
+        const x0 = Math.max(0, x - radius);
+        const x1 = Math.min(w - 1, x + radius);
+        const count = (x1 - x0 + 1) * (y1 - y0 + 1);
+        const sum =
+          integral[(y1 + 1) * (w + 1) + (x1 + 1)] -
+          integral[y0 * (w + 1) + (x1 + 1)] -
+          integral[(y1 + 1) * (w + 1) + x0] +
+          integral[y0 * (w + 1) + x0];
+        out[y * w + x] = sum / count;
+      }
+    }
+    return out;
+  }
+
+  function fmLoadImageAndStartStep1(img) {
+    fmState.sourceImg = img;
+    fmState.width = img.width;
+    fmState.height = img.height;
+
+    const off = document.createElement('canvas');
+    off.width = img.width;
+    off.height = img.height;
+    const octx = off.getContext('2d');
+    octx.drawImage(img, 0, 0);
+    const imgData = octx.getImageData(0, 0, img.width, img.height).data;
+
+    const n = img.width * img.height;
+    const gray = new Float32Array(n);
+    for (let i = 0; i < n; i++) {
+      gray[i] = 0.299 * imgData[i * 4] + 0.587 * imgData[i * 4 + 1] + 0.114 * imgData[i * 4 + 2];
+    }
+    fmState.grayArr = gray;
+    fmState.bgArr = computeBoxBlurGray(gray, img.width, img.height, 22);
+    fmState.alphaArr = new Uint8Array(n);
+    fmState.boxes = [];
+    fmState.history = [];
+    fmState.historyIdx = -1;
+
+    fmSetStep(1);
+    fmFitCanvas();
+    fmRenderCanvas();
+  }
+
+  function fmRunAutoBoxDetection() {
+    const w = fmState.width;
+    const h = fmState.height;
+    const mask = new Uint8Array(w * h);
+    for (let y = 6; y < h - 6; y++) {
+      for (let x = 6; x < w - 6; x++) {
+        if (fmState.alphaArr[y * w + x] > 45) mask[y * w + x] = 1;
+      }
+    }
+
+    // Dilate by 2px so multi-stroke digits ('4', '5') stay unified
+    const dilated = new Uint8Array(w * h);
+    for (let y = 2; y < h - 2; y++) {
+      for (let x = 2; x < w - 2; x++) {
+        if (mask[y * w + x]) {
+          for (let dy = -2; dy <= 2; dy++) {
+            for (let dx = -2; dx <= 2; dx++) {
+              dilated[(y + dy) * w + (x + dx)] = 1;
+            }
+          }
+        }
+      }
+    }
+
+    const visited = new Uint8Array(w * h);
+    const detected = [];
+    const qx = new Int32Array(w * h);
+    const qy = new Int32Array(w * h);
+
+    for (let y = 6; y < h - 6; y++) {
+      for (let x = 6; x < w - 6; x++) {
+        const idx = y * w + x;
+        if (dilated[idx] && !visited[idx]) {
+          let head = 0;
+          let tail = 0;
+          qx[tail] = x;
+          qy[tail] = y;
+          tail++;
+          visited[idx] = 1;
+
+          let minX = x, maxX = x, minY = y, maxY = y;
+          let inkCount = 0;
+
+          while (head < tail) {
+            const cx = qx[head];
+            const cy = qy[head];
+            head++;
+            if (mask[cy * w + cx]) {
+              inkCount++;
+              if (cx < minX) minX = cx;
+              if (cx > maxX) maxX = cx;
+              if (cy < minY) minY = cy;
+              if (cy > maxY) maxY = cy;
+            }
+            const neighbors = [
+              [cx - 1, cy],
+              [cx + 1, cy],
+              [cx, cy - 1],
+              [cx, cy + 1]
+            ];
+            for (const [nx, ny] of neighbors) {
+              if (nx >= 2 && nx < w - 2 && ny >= 2 && ny < h - 2) {
+                const nIdx = ny * w + nx;
+                if (dilated[nIdx] && !visited[nIdx]) {
+                  visited[nIdx] = 1;
+                  qx[tail] = nx;
+                  qy[tail] = ny;
+                  tail++;
+                }
+              }
+            }
+          }
+
+          if (inkCount >= 4 && minX > 6 && minY > 6 && maxX < w - 6 && maxY < h - 6) {
+            const bx = Math.max(0, minX - 3);
+            const by = Math.max(0, minY - 3);
+            const bw = Math.min(w - bx, maxX - minX + 7);
+            const bh = Math.min(h - by, maxY - minY + 7);
+            if (bw <= 52 && bh <= 52) {
+              detected.push({ x: bx, y: by, w: bw, h: bh, label: null });
+            }
+          }
+        }
+      }
+    }
+
+    // Sort top-to-bottom, left-to-right
+    detected.sort((a, b) => a.y - b.y);
+    fmState.boxes = detected;
+    fmState.history = [];
+    fmState.historyIdx = -1;
+    fmPushHistory();
+  }
+
+  function fmAutoLabelByRows() {
+    if (!fmState.boxes.length) return;
+    const sorted = [...fmState.boxes].sort((a, b) => a.y + a.h / 2 - (b.y + b.h / 2));
+    const rows = [];
+    for (const b of sorted) {
+      const yc = b.y + b.h / 2;
+      if (!rows.length) {
+        rows.push([b]);
+      } else {
+        const lastRow = rows[rows.length - 1];
+        const avgY = lastRow.reduce((s, item) => s + item.y + item.h / 2, 0) / lastRow.length;
+        if (Math.abs(yc - avgY) > 26) {
+          rows.push([b]);
+        } else {
+          lastRow.push(b);
+        }
+      }
+    }
+    const validRows = rows.filter((r) => r.length >= 3);
+    validRows.forEach((row, rIdx) => {
+      if (rIdx >= CATEGORY_ORDER.length) return;
+      const cat = CATEGORY_ORDER[rIdx];
+      row.forEach((b) => {
+        // Skip obvious huge scratched-out mistakes
+        if ((cat === '5' || cat === '6') && (b.h > 38 || b.w > 42)) {
+          b.label = null;
+        } else {
+          b.label = cat;
+        }
+      });
+    });
+    fmPushHistory();
+    fmRenderBottomCategories();
+    fmRenderPreviewCanvas();
+    fmRenderCanvas();
+  }
+
+  function fmSetStep(step) {
+    fmState.step = step;
+    const welcome = document.getElementById('fmWelcomeScreen');
+    const stepsWrap = document.getElementById('fmStepsContainer');
+    if (step === 0) {
+      welcome.hidden = false;
+      stepsWrap.hidden = true;
+      return;
+    }
+    welcome.hidden = true;
+    stepsWrap.hidden = false;
+
+    const titleEl = document.getElementById('fmStepTitle');
+    const btnReup = document.getElementById('btnFmReupload');
+    const btnPrev = document.getElementById('btnFmPrevStep');
+    const btnUndo = document.getElementById('btnFmUndo');
+    const btnRedo = document.getElementById('btnFmRedo');
+    const tolBar = document.getElementById('fmToleranceBar');
+    const prevWrap = document.getElementById('fmStep3PreviewWrap');
+    const btnNext = document.getElementById('btnFmNextStep');
+    const btnExport = document.getElementById('btnFmExportFont');
+    const botBar = document.getElementById('fmBottomBar');
+    const hud = document.getElementById('fmHudTip');
+    const statusTxt = document.getElementById('fmStatusBarText');
+
+    if (step === 1) {
+      titleEl.textContent = '第一步：抠图';
+      btnReup.hidden = false;
+      btnPrev.hidden = true;
+      btnUndo.hidden = true;
+      btnRedo.hidden = true;
+      tolBar.hidden = false;
+      prevWrap.hidden = true;
+      btnNext.hidden = false;
+      btnExport.hidden = true;
+      botBar.hidden = true;
+      hud.innerHTML = '<div>滚轮：放大缩小检查</div><div>鼠标中键：拖动</div>';
+      statusTxt.textContent = '第一步：调节容差滑块，使背景变为透明棋盘格、手写笔画清晰';
+    } else if (step === 2) {
+      titleEl.textContent = '第二步：框字';
+      btnReup.hidden = true;
+      btnPrev.hidden = false;
+      btnUndo.hidden = false;
+      btnRedo.hidden = false;
+      tolBar.hidden = true;
+      prevWrap.hidden = true;
+      btnNext.hidden = false;
+      btnExport.hidden = true;
+      botBar.hidden = true;
+      hud.innerHTML =
+        '<div>滚轮：缩放画布</div><div>鼠标中键：拖动</div><div>右键：删除字框</div><div>拖动字框：调整位置</div><div>拖动四角：调整大小</div><div>在空白处拖动：补充字框</div>';
+      statusTxt.textContent = 'AI 已经预框选数字，请核对！';
+      if (fmState.boxes.length === 0) {
+        fmRunAutoBoxDetection();
+        showNoticeDialog('自动框字完成', 'AI 已经预框选数字，请核对！');
+      }
+    } else if (step === 3) {
+      titleEl.textContent = '第三步：标注';
+      btnReup.hidden = true;
+      btnPrev.hidden = false;
+      btnUndo.hidden = false;
+      btnRedo.hidden = false;
+      tolBar.hidden = true;
+      prevWrap.hidden = false;
+      btnNext.hidden = true;
+      btnExport.hidden = false;
+      botBar.hidden = false;
+      hud.innerHTML =
+        '<div>点击下方数字：进入标注模式</div><div>点击字框：标注一个数字</div><div>拖动框选：批量标注</div><div>再次点击数字：退出标注模式</div><div>鼠标中键：拖动</div>';
+      statusTxt.textContent = '拖动红框批量框选一整行即可快速标注对应数字，或点击右上角“一键按行标注”';
+      fmRenderBottomCategories();
+      fmRenderPreviewCanvas();
+    }
+    fmRenderCanvas();
+  }
+
+  function fmRenderBottomCategories() {
+    const bar = document.getElementById('fmBottomBar');
+    if (!bar) return;
+    bar.innerHTML = '';
+    for (const cat of CATEGORY_ORDER) {
+      const count = fmState.boxes.filter((b) => b.label === cat).length;
+      const item = document.createElement('div');
+      item.className = 'fm-cat-item';
+
+      const btn = document.createElement('button');
+      btn.type = 'button';
+      btn.className = 'fm-cat-btn' + (fmState.activeLabelCat === cat ? ' active' : '');
+      btn.textContent = cat;
+      btn.style.background = count > 0 || fmState.activeLabelCat === cat ? CATEGORY_COLORS[cat] : '#383838';
+      btn.addEventListener('click', () => {
+        fmState.activeLabelCat = fmState.activeLabelCat === cat ? null : cat;
+        fmRenderBottomCategories();
+      });
+
+      const cnt = document.createElement('span');
+      cnt.className = 'fm-cat-count';
+      cnt.textContent = `已选 ${count} 个`;
+
+      item.append(btn, cnt);
+      bar.appendChild(item);
+    }
+  }
+
+  function fmRenderPreviewCanvas() {
+    const pCanvas = document.getElementById('fmPreviewCanvas');
+    if (!pCanvas || !fmState.alphaArr) return;
+    const pctx = pCanvas.getContext('2d');
+    pctx.clearRect(0, 0, pCanvas.width, pCanvas.height);
+
+    // Draw "2 / 2" or labeled sample digits in white like Screenshot 13
+    const sampleTwo = fmState.boxes.filter((b) => b.label === '2');
+    pctx.fillStyle = '#ffffff';
+    pctx.font = 'italic 26px serif';
+    if (sampleTwo.length >= 2) {
+      pctx.fillText('2 / 2', 24, 32);
+    } else {
+      pctx.fillText('2 / 2', 24, 32);
+    }
+  }
+
+  function fmRenderCanvas() {
+    const canvas = document.getElementById('fmMainCanvas');
+    if (!canvas || !fmState.grayArr) return;
+    const w = fmState.width;
+    const h = fmState.height;
+    canvas.width = w;
+    canvas.height = h;
+    const ctx = canvas.getContext('2d');
+
+    // 1. Compute thresholded transparent ink image from tolerance
+    const imgData = ctx.createImageData(w, h);
+    const data = imgData.data;
+    const thresh = Math.max(4, 46 - fmState.tolerance);
+
+    for (let i = 0; i < w * h; i++) {
+      const diff = fmState.bgArr[i] - fmState.grayArr[i];
+      let a = 0;
+      if (diff > thresh) {
+        a = Math.min(255, Math.round(((diff - thresh) / 22) * 255));
+      }
+      fmState.alphaArr[i] = a;
+      data[i * 4] = 18;
+      data[i * 4 + 1] = 18;
+      data[i * 4 + 2] = 18;
+      data[i * 4 + 3] = a;
+    }
+    ctx.putImageData(imgData, 0, 0);
+
+    // 2. If Step 2 or Step 3, draw bounding boxes and labels
+    if (fmState.step >= 2) {
+      ctx.font = '11px sans-serif';
+      fmState.boxes.forEach((b, idx) => {
+        const color =
+          fmState.step === 3 && b.label
+            ? CATEGORY_COLORS[b.label]
+            : '#0ea5e9';
+        ctx.strokeStyle = color;
+        ctx.lineWidth = idx === fmState.selectedBoxIdx ? 2 : 1.3;
+        ctx.strokeRect(b.x, b.y, b.w, b.h);
+
+        // Top-left tag ("未标注" or digit label)
+        const tagText = fmState.step === 3 && b.label ? b.label : '未标注';
+        const tw = Math.max(18, ctx.measureText(tagText).width + 8);
+        ctx.fillStyle = color;
+        ctx.fillRect(b.x - 0.5, b.y - 16, tw, 16);
+        ctx.fillStyle = '#ffffff';
+        ctx.fillText(tagText, b.x + 3, b.y - 4);
+
+        // Draw corner resize handles when selected in Step 2
+        if (fmState.step === 2 && idx === fmState.selectedBoxIdx) {
+          const corners = [
+            [b.x, b.y],
+            [b.x + b.w, b.y],
+            [b.x, b.y + b.h],
+            [b.x + b.w, b.y + b.h]
+          ];
+          ctx.fillStyle = '#0ea5e9';
+          for (const [cx, cy] of corners) {
+            ctx.fillRect(cx - 3.5, cy - 3.5, 7, 7);
+          }
+        }
+      });
+
+      // Red dashed marquee box in Step 3 or Step 2
+      if (fmState.marquee) {
+        const mx = Math.min(fmState.marquee.x0, fmState.marquee.x1);
+        const my = Math.min(fmState.marquee.y0, fmState.marquee.y1);
+        const mw = Math.abs(fmState.marquee.x1 - fmState.marquee.x0);
+        const mh = Math.abs(fmState.marquee.y1 - fmState.marquee.y0);
+        ctx.save();
+        ctx.strokeStyle = '#ef4444';
+        ctx.lineWidth = 1.5;
+        ctx.setLineDash([5, 4]);
+        ctx.strokeRect(mx, my, mw, mh);
+        ctx.restore();
+      }
+    }
+
+    const stage = document.getElementById('fmCanvasStage');
+    stage.style.transform = `translate(${fmState.panX}px, ${fmState.panY}px) scale(${fmState.zoom / 100})`;
+  }
+
+  function fmFitCanvas() {
+    const vp = document.getElementById('fmCanvasViewport');
+    if (!vp || !fmState.width) return;
+    const vw = vp.clientWidth || 1000;
+    const vh = vp.clientHeight || 680;
+    const s = Math.min((vw - 80) / fmState.width, (vh - 60) / fmState.height);
+    fmState.zoom = Math.round(Math.max(40, Math.min(250, s * 100)));
+    fmState.panX = Math.round((vw - fmState.width * (fmState.zoom / 100)) / 2);
+    fmState.panY = Math.round((vh - fmState.height * (fmState.zoom / 100)) / 2);
+  }
+
+  async function fmExportCustomFont() {
+    const labeledBoxes = fmState.boxes.filter((b) => b.label);
+    if (labeledBoxes.length === 0) {
+      // Auto-label if user hasn't labeled yet so it never fails!
+      fmAutoLabelByRows();
+    }
+    const glyphs = {};
+    for (const k of CATEGORY_ORDER) glyphs[k] = [];
+
+    const w = fmState.width;
+    const h = fmState.height;
+    const off = document.createElement('canvas');
+
+    for (const b of fmState.boxes) {
+      if (!b.label || !glyphs[b.label]) continue;
+      const bx = Math.max(0, Math.round(b.x));
+      const by = Math.max(0, Math.round(b.y));
+      const bw = Math.min(w - bx, Math.max(4, Math.round(b.w)));
+      const bh = Math.min(h - by, Math.max(4, Math.round(b.h)));
+      off.width = bw;
+      off.height = bh;
+      const octx = off.getContext('2d');
+      const idata = octx.createImageData(bw, bh);
+      for (let yy = 0; yy < bh; yy++) {
+        for (let xx = 0; xx < bw; xx++) {
+          const srcIdx = (by + yy) * w + (bx + xx);
+          const dstIdx = (yy * bw + xx) * 4;
+          idata.data[dstIdx] = 20;
+          idata.data[dstIdx + 1] = 20;
+          idata.data[dstIdx + 2] = 20;
+          idata.data[dstIdx + 3] = fmState.alphaArr[srcIdx];
+        }
+      }
+      octx.putImageData(idata, 0, 0);
+      glyphs[b.label].push({
+        w: bw,
+        h: bh,
+        src: off.toDataURL('image/png')
+      });
+    }
+
+    const totalSaved = Object.values(glyphs).reduce((s, arr) => s + arr.length, 0);
+    const fontObj = {
+      name: `自制手写字体 #${fontsRegistry.length}`,
+      glyphs
+    };
+    await loadFontFromData(fontObj);
+    renderCurrentPage();
+    showNoticeDialog('导出字体', `生成成功，共保存 ${totalSaved} 个字形`);
+  }
+
+  // =========================================================================
+  // Event Listeners & Initialization
+  // =========================================================================
+  function bindEvents() {
+    // Top Window Mode Switch
+    document.getElementById('tabMainApp').addEventListener('click', () => {
+      if (state.pages.length > 0) showWorkspaceView();
+      else showHomeView();
+    });
+    document.getElementById('tabFontMaker').addEventListener('click', () => showFontMakerView());
+    document.getElementById('btnHomeOpenFontMaker').addEventListener('click', () => showFontMakerView());
+    document.getElementById('btnGoMakeFont').addEventListener('click', () => showFontMakerView());
+
+    // Home Example Cards & Buttons
+    document.getElementById('btnExample1').addEventListener('click', () => loadExample('example1'));
+    document.getElementById('btnExample2').addEventListener('click', () => loadExample('example2'));
+
+    const fileInputPdf = document.getElementById('fileInputPdf');
+    document.getElementById('btnHomeSelectPdf').addEventListener('click', () => fileInputPdf.click());
+    document.getElementById('btnReselectPdf').addEventListener('click', () => showHomeView());
+    fileInputPdf.addEventListener('change', (e) => {
+      if (e.target.files && e.target.files[0]) loadUserPdfFile(e.target.files[0]);
+      e.target.value = '';
+    });
+
+    // Save / Load Project JSON
+    const fileInputProject = document.getElementById('fileInputProject');
+    document.getElementById('btnHomeLoadProject').addEventListener('click', () => fileInputProject.click());
+    document.getElementById('btnLoadProject').addEventListener('click', () => fileInputProject.click());
+    fileInputProject.addEventListener('change', async (e) => {
+      const f = e.target.files && e.target.files[0];
+      if (!f) return;
+      try {
+        const txt = await f.text();
+        const proj = JSON.parse(txt);
+        if (proj.config) {
+          state.config = proj.config;
+          if (!state.pages.length) await loadExample('example1');
+          syncAllControlsFromState();
+          renderCurrentPage();
+        }
+      } catch (err) {
+        alert('项目文件格式无效');
+      }
+      e.target.value = '';
+    });
+
+    document.getElementById('btnSaveProject').addEventListener('click', () => {
+      const blob = new Blob([JSON.stringify({ projectPath: state.projectPath, config: state.config }, null, 2)], {
+        type: 'application/json'
+      });
+      const a = document.createElement('a');
+      a.href = URL.createObjectURL(blob);
+      a.download = '手写数字项目配置.json';
+      a.click();
+    });
+
+    // Top Toolbar Controls
+    document.getElementById('btnUndo').addEventListener('click', undoConfig);
+    document.getElementById('btnRedo').addEventListener('click', redoConfig);
+    document.getElementById('btnZoomOut').addEventListener('click', () => {
+      state.zoom = Math.max(40, state.zoom - 15);
+      updateStageTransform();
+    });
+    document.getElementById('btnZoomIn').addEventListener('click', () => {
+      state.zoom = Math.min(300, state.zoom + 15);
+      updateStageTransform();
+    });
+    document.getElementById('zoomSlider').addEventListener('input', (e) => {
+      state.zoom = Number(e.target.value);
+      updateStageTransform();
+    });
+    document.getElementById('chkHideLegend').addEventListener('change', (e) => {
+      state.hideLegend = e.target.checked;
+      updateStageOverlayHandles();
+    });
+
+    // Page Navigation
+    document.getElementById('btnPrevPage').addEventListener('click', () => {
+      if (state.currentPage > 1) {
+        state.currentPage--;
+        refreshPageNavUI();
+        syncAllControlsFromState();
+        renderCurrentPage();
+      }
+    });
+    document.getElementById('btnNextPage').addEventListener('click', () => {
+      if (state.currentPage < state.pages.length) {
+        state.currentPage++;
+        refreshPageNavUI();
+        syncAllControlsFromState();
+        renderCurrentPage();
+      }
+    });
+    document.getElementById('pageSelect').addEventListener('change', (e) => {
+      state.currentPage = Number(e.target.value);
+      refreshPageNavUI();
+      syncAllControlsFromState();
+      renderCurrentPage();
+    });
+
+    document.getElementById('btnRerollSeed').addEventListener('click', () => {
+      state.globalSeed = Math.floor(Math.random() * 90000000) + 100000;
+      if (state.config.fillMode === 'manual') {
+        populateManualTable(state.config.visionPreset ? 'vision' : 'temp');
+      }
+      renderCurrentPage();
+    });
+
+    document.getElementById('btnExportPdf').addEventListener('click', openExportModal);
+    document.getElementById('btnSettings').addEventListener('click', openExportModal);
+    document.getElementById('btnCloseExportModal').addEventListener('click', () => document.getElementById('dialogExportPdf').close());
+    document.getElementById('btnCancelExport').addEventListener('click', () => document.getElementById('dialogExportPdf').close());
+    document.getElementById('btnStartExport').addEventListener('click', runPdfExport);
+
+    // Card 1 & Card 2 Sliders + Number Inputs
+    const bindGridControl = (rngId, numId, key, isPageSpecific = false, isInt = false) => {
+      const rng = document.getElementById(rngId);
+      const num = document.getElementById(numId);
+      const apply = (raw) => {
+        const val = isInt ? Math.max(1, Math.round(Number(raw))) : Number(Number(raw).toFixed(2));
+        if (isPageSpecific) setPageGridParam(key, val);
+        else state.config[key] = val;
+        if (key === 'cols') {
+          renderColsCheckGrid();
+        }
+        syncAllControlsFromState();
+        renderCurrentPage();
+      };
+      rng.addEventListener('input', () => apply(rng.value));
+      rng.addEventListener('change', () => pushHistory());
+      num.addEventListener('change', () => {
+        apply(num.value);
+        pushHistory();
+      });
+    };
+
+    bindGridControl('rngStartX', 'numStartX', 'startX', true, false);
+    bindGridControl('rngStartY', 'numStartY', 'startY', true, false);
+    bindGridControl('rngColWidth', 'numColWidth', 'colWidth', false, false);
+    bindGridControl('rngRowHeight', 'numRowHeight', 'rowHeight', false, false);
+    bindGridControl('rngCellPad', 'numCellPad', 'cellPad', false, false);
+    bindGridControl('rngRows', 'numRows', 'rows', true, true);
+    bindGridControl('rngCols', 'numCols', 'cols', false, true);
+
+    // Ruler toggles
+    document.getElementById('btnToggleColRuler').addEventListener('click', () => {
+      state.showColRuler = !state.showColRuler;
+      updateStageOverlayHandles();
+    });
+    document.getElementById('btnToggleRowRuler').addEventListener('click', () => {
+      state.showRowRuler = !state.showRowRuler;
+      updateStageOverlayHandles();
+    });
+
+    // Reset buttons in Card 1 & 2
+    const defaultsGrid = { startX: 4.91, startY: 3.82, colWidth: 1.82, rowHeight: 0.72, cellPad: -0.28, rows: 24, cols: 10 };
+    document.querySelectorAll('[data-reset]').forEach((btn) => {
+      btn.addEventListener('click', () => {
+        const k = btn.dataset.reset;
+        if (k === 'startX' || k === 'startY' || k === 'rows') {
+          setPageGridParam(k, defaultsGrid[k]);
+        } else {
+          state.config[k] = defaultsGrid[k];
+        }
+        syncAllControlsFromState();
+        pushHistory();
+        renderCurrentPage();
+      });
+    });
+
+    // Fill Mode Tabs & Presets
+    document.getElementById('tabFillRandom').addEventListener('click', () => {
+      state.config.fillMode = 'random';
+      syncAllControlsFromState();
+      renderCurrentPage();
+    });
+    document.getElementById('tabFillManual').addEventListener('click', () => {
+      state.config.fillMode = 'manual';
+      syncAllControlsFromState();
+      renderCurrentPage();
+      openManualInputModal();
+    });
+
+    document.getElementById('btnPresetTemp').addEventListener('click', () => {
+      state.config.visionPreset = false;
+      state.config.fillMode = 'random';
+      state.config.digitSlots = [
+        { type: 'digit', digits: [3] },
+        { type: 'digit', digits: [6] },
+        { type: 'dot', digits: ['.'] },
+        { type: 'digit', digits: [1, 2, 3, 4, 5, 6, 7, 8, 9] }
+      ];
+      syncAllControlsFromState();
+      pushHistory();
+      renderCurrentPage();
+    });
+
+    document.getElementById('btnPresetVision').addEventListener('click', () => {
+      state.config.visionPreset = true;
+      state.config.fillMode = 'random';
+      state.config.digitSlots = [
+        { type: 'digit', digits: [4, 5] },
+        { type: 'dot', digits: ['.'] },
+        { type: 'digit', digits: [0, 1, 3, 4, 5, 6, 7, 8, 9] }
+      ];
+      syncAllControlsFromState();
+      pushHistory();
+      renderCurrentPage();
+    });
+
+    document.getElementById('btnAddDigitSlot').addEventListener('click', () => {
+      state.config.visionPreset = false;
+      state.config.digitSlots.push({ type: 'digit', digits: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9] });
+      renderDigitSlotsUI();
+      pushHistory();
+      renderCurrentPage();
+    });
+
+    // Edit Slot Modal
+    document.getElementById('slotTypeSelect').addEventListener('change', (e) => {
+      document.getElementById('slotDigitsWrap').hidden = e.target.value === 'dot';
+    });
+    document.getElementById('btnSlotSelectAll').addEventListener('click', () => {
+      document.querySelectorAll('#slotDigitChecks input[type="checkbox"]').forEach((c) => (c.checked = true));
+    });
+    document.getElementById('btnSlotSelectClear').addEventListener('click', () => {
+      document.querySelectorAll('#slotDigitChecks input[type="checkbox"]').forEach((c) => (c.checked = false));
+    });
+    document.getElementById('btnSlotOk').addEventListener('click', () => {
+      const slot = state.config.digitSlots[editingSlotIndex];
+      if (slot) {
+        const t = document.getElementById('slotTypeSelect').value;
+        slot.type = t;
+        state.config.visionPreset = false;
+        if (t === 'dot') {
+          slot.digits = ['.'];
+        } else {
+          const checked = [];
+          document.querySelectorAll('#slotDigitChecks input[type="checkbox"]:checked').forEach((c) => {
+            checked.push(Number(c.value));
+          });
+          slot.digits = checked.length ? checked : [0];
+        }
+        renderDigitSlotsUI();
+        pushHistory();
+        renderCurrentPage();
+      }
+      document.getElementById('dialogEditSlot').close();
+    });
+    document.getElementById('btnSlotCancel').addEventListener('click', () => document.getElementById('dialogEditSlot').close());
+    document.getElementById('btnCloseSlotModal').addEventListener('click', () => document.getElementById('dialogEditSlot').close());
+
+    // Manual Input Modal buttons
+    document.getElementById('btnOpenManualModal').addEventListener('click', openManualInputModal);
+    document.getElementById('btnCloseManualModal').addEventListener('click', () => document.getElementById('dialogManualInput').close());
+    document.getElementById('btnSaveManualModal').addEventListener('click', saveManualModalChanges);
+    document.getElementById('btnModalFillVision').addEventListener('click', () => {
+      state.globalSeed += 17;
+      populateManualTable('vision');
+      openManualInputModal();
+      renderCurrentPage();
+    });
+    document.getElementById('btnModalFillTemp').addEventListener('click', () => {
+      state.globalSeed += 17;
+      populateManualTable('temp');
+      openManualInputModal();
+      renderCurrentPage();
+    });
+    document.getElementById('btnRegenManualVision').addEventListener('click', () => {
+      state.globalSeed += 19;
+      populateManualTable('vision');
+      renderCurrentPage();
+    });
+    document.getElementById('btnRegenManualTemp').addEventListener('click', () => {
+      state.globalSeed += 19;
+      populateManualTable('temp');
+      renderCurrentPage();
+    });
+
+    // Font Select & Checkboxes
+    document.getElementById('fontSelect').addEventListener('change', (e) => {
+      activeFontIndex = Number(e.target.value) || 0;
+      refreshFontSelectUI();
+      renderCurrentPage();
+    });
+    document.getElementById('chkNormalizeFontSize').addEventListener('change', (e) => {
+      state.normalizeFontSize = e.target.checked;
+      renderCurrentPage();
+    });
+    document.getElementById('chkScratchEffect').addEventListener('change', (e) => {
+      state.scratchEffect = e.target.checked;
+      renderCurrentPage();
+    });
+
+    // Dice Randomizer Buttons on Card Headers (Video 0:35-0:36)
+    document.querySelectorAll('[data-dice-section]').forEach((btn) => {
+      btn.addEventListener('click', () => {
+        const secKey = btn.dataset.diceSection;
+        const schema = RANDOM_SECTIONS_SCHEMA[secKey];
+        if (!schema) return;
+        for (const f of schema.fields) {
+          const [d0, d1] = f.def;
+          const jitter0 = (0.65 + Math.random() * 0.75) * d0;
+          const jitter1 = (0.65 + Math.random() * 0.75) * d1;
+          state.config[secKey][f.key] = [
+            Number(Math.max(f.min, Math.min(f.max, jitter0)).toFixed(2)),
+            Number(Math.max(f.min, Math.min(f.max, jitter1)).toFixed(2))
+          ];
+        }
+        state.globalSeed += 7;
+        syncAllControlsFromState();
+        pushHistory();
+        renderCurrentPage();
+      });
+    });
+
+    // Copy / Paste Section Parameters
+    document.querySelectorAll('[data-copy-section]').forEach((btn) => {
+      btn.addEventListener('click', () => {
+        const sec = btn.dataset.copySection;
+        if (sec === 'grid') {
+          state.clipboardSection.grid = {
+            startX: state.config.startX,
+            startY: state.config.startY,
+            colWidth: state.config.colWidth,
+            rowHeight: state.config.rowHeight,
+            cellPad: state.config.cellPad
+          };
+        } else {
+          state.clipboardSection[sec] = deepClone(state.config[sec]);
+        }
+      });
+    });
+    document.querySelectorAll('[data-paste-section]').forEach((btn) => {
+      btn.addEventListener('click', () => {
+        const sec = btn.dataset.pasteSection;
+        if (!state.clipboardSection[sec]) return;
+        if (sec === 'grid') {
+          Object.assign(state.config, deepClone(state.clipboardSection.grid));
+        } else {
+          state.config[sec] = deepClone(state.clipboardSection[sec]);
+        }
+        syncAllControlsFromState();
+        pushHistory();
+        renderCurrentPage();
+      });
+    });
+
+    // Interactive Red Origin Handle Dragging
+    const originHandle = document.getElementById('originHandle');
+    originHandle.addEventListener('pointerdown', (e) => {
+      e.stopPropagation();
+      e.preventDefault();
+      originHandle.setPointerCapture(e.pointerId);
+      const pg = getPageGridParams();
+      const startClientX = e.clientX;
+      const startClientY = e.clientY;
+      const initX = pg.startX;
+      const initY = pg.startY;
+      const scale = state.zoom / 100;
+
+      const onMove = (ev) => {
+        const dxCm = (ev.clientX - startClientX) / (PX_PER_CM * scale);
+        const dyCm = (ev.clientY - startClientY) / (PX_PER_CM * scale);
+        setPageGridParam('startX', Number(Math.max(0.2, initX + dxCm).toFixed(2)));
+        setPageGridParam('startY', Number(Math.max(0.2, initY + dyCm).toFixed(2)));
+        syncAllControlsFromState();
+        renderCurrentPage();
+      };
+      const onUp = () => {
+        originHandle.removeEventListener('pointermove', onMove);
+        originHandle.removeEventListener('pointerup', onUp);
+        pushHistory();
+      };
+      originHandle.addEventListener('pointermove', onMove);
+      originHandle.addEventListener('pointerup', onUp);
+    });
+
+    // Interactive Green Column Width & Row Height Ruler Dragging
+    const colRuler = document.getElementById('colWidthRuler');
+    colRuler.addEventListener('pointerdown', (e) => {
+      e.stopPropagation();
+      e.preventDefault();
+      colRuler.setPointerCapture(e.pointerId);
+      const startClientX = e.clientX;
+      const initW = state.config.colWidth;
+      const scale = state.zoom / 100;
+      const onMove = (ev) => {
+        const dxCm = (ev.clientX - startClientX) / (PX_PER_CM * scale);
+        state.config.colWidth = Number(Math.max(0.4, Math.min(6.0, initW + dxCm)).toFixed(2));
+        syncAllControlsFromState();
+        renderCurrentPage();
+      };
+      const onUp = () => {
+        colRuler.removeEventListener('pointermove', onMove);
+        colRuler.removeEventListener('pointerup', onUp);
+        pushHistory();
+      };
+      colRuler.addEventListener('pointermove', onMove);
+      colRuler.addEventListener('pointerup', onUp);
+    });
+
+    const rowRuler = document.getElementById('rowHeightRuler');
+    rowRuler.addEventListener('pointerdown', (e) => {
+      e.stopPropagation();
+      e.preventDefault();
+      rowRuler.setPointerCapture(e.pointerId);
+      const startClientY = e.clientY;
+      const initH = state.config.rowHeight;
+      const scale = state.zoom / 100;
+      const onMove = (ev) => {
+        const dyCm = (ev.clientY - startClientY) / (PX_PER_CM * scale);
+        state.config.rowHeight = Number(Math.max(0.3, Math.min(3.0, initH + dyCm)).toFixed(2));
+        syncAllControlsFromState();
+        renderCurrentPage();
+      };
+      const onUp = () => {
+        rowRuler.removeEventListener('pointermove', onMove);
+        rowRuler.removeEventListener('pointerup', onUp);
+        pushHistory();
+      };
+      rowRuler.addEventListener('pointermove', onMove);
+      rowRuler.addEventListener('pointerup', onUp);
+    });
+
+    // Viewport Panning & Wheel Zooming
+    const viewport = document.getElementById('canvasViewport');
+    let isPanning = false;
+    let panStartX = 0;
+    let panStartY = 0;
+
+    viewport.addEventListener('pointerdown', (e) => {
+      if (e.button !== 0 && e.button !== 1) return;
+      isPanning = true;
+      viewport.classList.add('panning');
+      viewport.setPointerCapture(e.pointerId);
+      panStartX = e.clientX - state.panX;
+      panStartY = e.clientY - state.panY;
+    });
+    viewport.addEventListener('pointermove', (e) => {
+      if (!isPanning) return;
+      state.panX = e.clientX - panStartX;
+      state.panY = e.clientY - panStartY;
+      updateStageTransform();
+    });
+    const endPan = () => {
+      isPanning = false;
+      viewport.classList.remove('panning');
+    };
+    viewport.addEventListener('pointerup', endPan);
+    viewport.addEventListener('pointercancel', endPan);
+
+    viewport.addEventListener(
+      'wheel',
+      (e) => {
+        e.preventDefault();
+        const rect = viewport.getBoundingClientRect();
+        const mx = e.clientX - rect.left;
+        const my = e.clientY - rect.top;
+        const oldScale = state.zoom / 100;
+        const delta = e.deltaY < 0 ? 12 : -12;
+        const newZoom = Math.max(40, Math.min(300, state.zoom + delta));
+        const newScale = newZoom / 100;
+        state.panX = mx - ((mx - state.panX) / oldScale) * newScale;
+        state.panY = my - ((my - state.panY) / oldScale) * newScale;
+        state.zoom = newZoom;
+        updateStageTransform();
+      },
+      { passive: false }
+    );
+
+    // =====================================================================
+    // Font Maker Event Listeners
+    // =====================================================================
+    const fileInputPhoto = document.getElementById('fileInputPhoto');
+    document.getElementById('btnFmUploadPhoto').addEventListener('click', () => fileInputPhoto.click());
+    document.getElementById('btnFmReupload').addEventListener('click', () => fileInputPhoto.click());
+    fileInputPhoto.addEventListener('change', (e) => {
+      const f = e.target.files && e.target.files[0];
+      if (!f) return;
+      const reader = new FileReader();
+      reader.onload = () => {
+        const im = new Image();
+        im.onload = () => fmLoadImageAndStartStep1(im);
+        im.src = reader.result;
+      };
+      reader.readAsDataURL(f);
+      e.target.value = '';
+    });
+
+    document.getElementById('btnFmUseSamplePhoto').addEventListener('click', () => {
+      const im = new Image();
+      im.onload = () => fmLoadImageAndStartStep1(im);
+      im.src = window.DEFAULT_HANDWRITE_DATA.sampleSheet;
+    });
+
+    document.getElementById('fmToleranceSlider').addEventListener('input', (e) => {
+      fmState.tolerance = Number(e.target.value);
+      document.getElementById('fmToleranceVal').textContent = String(fmState.tolerance);
+      fmRenderCanvas();
+    });
+
+    document.getElementById('btnFmNextStep').addEventListener('click', () => {
+      if (fmState.step === 1) fmSetStep(2);
+      else if (fmState.step === 2) fmSetStep(3);
+    });
+    document.getElementById('btnFmPrevStep').addEventListener('click', () => {
+      if (fmState.step === 3) fmSetStep(2);
+      else if (fmState.step === 2) fmSetStep(1);
+    });
+
+    document.getElementById('btnFmUndo').addEventListener('click', () => {
+      if (fmState.historyIdx > 0) {
+        fmState.historyIdx--;
+        fmState.boxes = deepClone(fmState.history[fmState.historyIdx]);
+        document.getElementById('btnFmUndo').disabled = fmState.historyIdx <= 0;
+        document.getElementById('btnFmRedo').disabled = fmState.historyIdx >= fmState.history.length - 1;
+        fmRenderBottomCategories();
+        fmRenderCanvas();
+      }
+    });
+    document.getElementById('btnFmRedo').addEventListener('click', () => {
+      if (fmState.historyIdx < fmState.history.length - 1) {
+        fmState.historyIdx++;
+        fmState.boxes = deepClone(fmState.history[fmState.historyIdx]);
+        document.getElementById('btnFmUndo').disabled = fmState.historyIdx <= 0;
+        document.getElementById('btnFmRedo').disabled = fmState.historyIdx >= fmState.history.length - 1;
+        fmRenderBottomCategories();
+        fmRenderCanvas();
+      }
+    });
+
+    document.getElementById('btnFmAutoLabelRows').addEventListener('click', fmAutoLabelByRows);
+    document.getElementById('btnFmExportFont').addEventListener('click', fmExportCustomFont);
+
+    document.getElementById('btnCloseNotice').addEventListener('click', () => document.getElementById('dialogNotice').close());
+    document.getElementById('btnNoticeOk').addEventListener('click', () => document.getElementById('dialogNotice').close());
+
+    // Font Maker Canvas Interactions (Pan, Zoom, Box Move/Resize/Add, Right-click Delete, Step 3 Marquee Label)
+    const fmVp = document.getElementById('fmCanvasViewport');
+    const fmMenu = document.getElementById('fmContextMenu');
+
+    const toFmCoords = (e) => {
+      const rect = fmVp.getBoundingClientRect();
+      const s = fmState.zoom / 100;
+      return {
+        x: (e.clientX - rect.left - fmState.panX) / s,
+        y: (e.clientY - rect.top - fmState.panY) / s
+      };
+    };
+
+    fmVp.addEventListener('contextmenu', (e) => {
+      e.preventDefault();
+      if (fmState.step !== 2) return;
+      const pt = toFmCoords(e);
+      const hitIdx = fmState.boxes.findIndex((b) => pt.x >= b.x && pt.x <= b.x + b.w && pt.y >= b.y && pt.y <= b.y + b.h);
+      if (hitIdx >= 0) {
+        fmState.contextBoxIdx = hitIdx;
+        fmState.selectedBoxIdx = hitIdx;
+        fmRenderCanvas();
+        fmMenu.style.left = `${e.clientX}px`;
+        fmMenu.style.top = `${e.clientY}px`;
+        fmMenu.hidden = false;
+      }
+    });
+
+    document.getElementById('btnFmDeleteBox').addEventListener('click', () => {
+      if (fmState.contextBoxIdx >= 0) {
+        fmState.boxes.splice(fmState.contextBoxIdx, 1);
+        fmState.contextBoxIdx = -1;
+        fmState.selectedBoxIdx = -1;
+        fmPushHistory();
+        fmRenderCanvas();
+      }
+      fmMenu.hidden = true;
+    });
+    document.getElementById('btnFmCancelMenu').addEventListener('click', () => {
+      fmMenu.hidden = true;
+    });
+
+    let fmDragMode = null; // 'pan' | 'moveBox' | 'newBox' | 'marquee'
+    let fmDragStart = { x: 0, y: 0, clientX: 0, clientY: 0, boxOrig: null };
+
+    fmVp.addEventListener('pointerdown', (e) => {
+      fmMenu.hidden = true;
+      if (e.button === 2) return;
+      fmVp.setPointerCapture(e.pointerId);
+      const pt = toFmCoords(e);
+
+      if (e.button === 1 || fmState.step === 1) {
+        fmDragMode = 'pan';
+        fmDragStart = { clientX: e.clientX - fmState.panX, clientY: e.clientY - fmState.panY };
+        return;
+      }
+
+      if (fmState.step === 2) {
+        const hitIdx = fmState.boxes.findIndex((b) => pt.x >= b.x && pt.x <= b.x + b.w && pt.y >= b.y && pt.y <= b.y + b.h);
+        if (hitIdx >= 0) {
+          fmState.selectedBoxIdx = hitIdx;
+          fmDragMode = 'moveBox';
+          fmDragStart = { x: pt.x, y: pt.y, boxOrig: { ...fmState.boxes[hitIdx] } };
+        } else {
+          fmState.selectedBoxIdx = -1;
+          fmDragMode = 'newBox';
+          fmState.marquee = { x0: pt.x, y0: pt.y, x1: pt.x, y1: pt.y };
+        }
+        fmRenderCanvas();
+      } else if (fmState.step === 3) {
+        if (!fmState.activeLabelCat) {
+          fmDragMode = 'pan';
+          fmDragStart = { clientX: e.clientX - fmState.panX, clientY: e.clientY - fmState.panY };
+          return;
+        }
+        const hitIdx = fmState.boxes.findIndex((b) => pt.x >= b.x && pt.x <= b.x + b.w && pt.y >= b.y && pt.y <= b.y + b.h);
+        if (hitIdx >= 0) {
+          fmState.boxes[hitIdx].label = fmState.activeLabelCat;
+          fmPushHistory();
+          fmRenderBottomCategories();
+          fmRenderCanvas();
+        } else {
+          fmDragMode = 'marquee';
+          fmState.marquee = { x0: pt.x, y0: pt.y, x1: pt.x, y1: pt.y };
+          fmRenderCanvas();
+        }
+      }
+    });
+
+    fmVp.addEventListener('pointermove', (e) => {
+      if (!fmDragMode) return;
+      const pt = toFmCoords(e);
+      if (fmDragMode === 'pan') {
+        fmState.panX = e.clientX - fmDragStart.clientX;
+        fmState.panY = e.clientY - fmDragStart.clientY;
+        fmRenderCanvas();
+      } else if (fmDragMode === 'moveBox' && fmState.selectedBoxIdx >= 0) {
+        const b = fmState.boxes[fmState.selectedBoxIdx];
+        b.x = fmDragStart.boxOrig.x + (pt.x - fmDragStart.x);
+        b.y = fmDragStart.boxOrig.y + (pt.y - fmDragStart.y);
+        fmRenderCanvas();
+      } else if ((fmDragMode === 'newBox' || fmDragMode === 'marquee') && fmState.marquee) {
+        fmState.marquee.x1 = pt.x;
+        fmState.marquee.y1 = pt.y;
+        fmRenderCanvas();
+      }
+    });
+
+    fmVp.addEventListener('pointerup', () => {
+      if (fmDragMode === 'moveBox') {
+        fmPushHistory();
+      } else if (fmDragMode === 'newBox' && fmState.marquee) {
+        const mx = Math.min(fmState.marquee.x0, fmState.marquee.x1);
+        const my = Math.min(fmState.marquee.y0, fmState.marquee.y1);
+        const mw = Math.abs(fmState.marquee.x1 - fmState.marquee.x0);
+        const mh = Math.abs(fmState.marquee.y1 - fmState.marquee.y0);
+        if (mw > 5 && mh > 5) {
+          fmState.boxes.push({ x: mx, y: my, w: mw, h: mh, label: null });
+          fmPushHistory();
+        }
+        fmState.marquee = null;
+        fmRenderCanvas();
+      } else if (fmDragMode === 'marquee' && fmState.marquee && fmState.activeLabelCat) {
+        const mx0 = Math.min(fmState.marquee.x0, fmState.marquee.x1);
+        const my0 = Math.min(fmState.marquee.y0, fmState.marquee.y1);
+        const mx1 = Math.max(fmState.marquee.x0, fmState.marquee.x1);
+        const my1 = Math.max(fmState.marquee.y0, fmState.marquee.y1);
+        let changed = false;
+        fmState.boxes.forEach((b) => {
+          const cx = b.x + b.w / 2;
+          const cy = b.y + b.h / 2;
+          if (cx >= mx0 && cx <= mx1 && cy >= my0 && cy <= my1) {
+            b.label = fmState.activeLabelCat;
+            changed = true;
+          }
+        });
+        fmState.marquee = null;
+        if (changed) fmPushHistory();
+        fmRenderBottomCategories();
+        fmRenderCanvas();
+      }
+      fmDragMode = null;
+    });
+
+    fmVp.addEventListener(
+      'wheel',
+      (e) => {
+        e.preventDefault();
+        const delta = e.deltaY < 0 ? 12 : -12;
+        fmState.zoom = Math.max(35, Math.min(350, fmState.zoom + delta));
+        fmRenderCanvas();
+      },
+      { passive: false }
+    );
+  }
+
+  // =========================================================================
+  // Boot Application
+  // =========================================================================
+  async function init() {
+    initAllNativeSliders();
+    buildDualSliderSections();
+    bindEvents();
+
+    // Populate Home Example Preview Cards & Font Maker Welcome Photo
+    if (window.HANDWRITE_EXAMPLES) {
+      const ex1 = window.HANDWRITE_EXAMPLES.example1;
+      const ex2 = window.HANDWRITE_EXAMPLES.example2;
+      if (ex1 && ex1.pages[0]) document.getElementById('imgExample1Preview').src = ex1.pages[0].src;
+      if (ex2 && ex2.pages[0]) document.getElementById('imgExample2Preview').src = ex2.pages[0].src;
+    }
+
+    if (window.DEFAULT_HANDWRITE_DATA) {
+      document.getElementById('fmSamplePhotoImg').src = window.DEFAULT_HANDWRITE_DATA.sampleSheet;
+      await loadFontFromData(window.DEFAULT_HANDWRITE_DATA);
+    }
+
+    showHomeView();
+
+    // Optional URL parameter for quick preview / automated verification
+    const params = new URLSearchParams(window.location.search);
+    const demo = params.get('demo');
+    if (demo === 'example1') {
+      await loadExample('example1');
+      if (params.get('zoom')) {
+        state.zoom = Number(params.get('zoom'));
+        state.panX = Number(params.get('panX') || -60);
+        state.panY = Number(params.get('panY') || -20);
+        updateStageTransform();
+      }
+    } else if (demo === 'example2') {
+      await loadExample('example2');
+    } else if (demo === 'manual') {
+      await loadExample('example2');
+      openManualInputModal();
+    } else if (demo && demo.startsWith('fontmaker')) {
+      showFontMakerView();
+      if (demo !== 'fontmaker0') {
+        const im = new Image();
+        await new Promise((r) => {
+          im.onload = r;
+          im.src = window.DEFAULT_HANDWRITE_DATA.sampleSheet;
+        });
+        fmLoadImageAndStartStep1(im);
+        if (demo === 'fontmaker2') {
+          fmSetStep(2);
+        } else if (demo === 'fontmaker3') {
+          fmSetStep(2);
+          document.getElementById('dialogNotice').close();
+          fmSetStep(3);
+          fmAutoLabelByRows();
+        }
+      }
+    }
+  }
+
+  window.addEventListener('DOMContentLoaded', init);
+})();

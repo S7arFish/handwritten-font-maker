@@ -1,0 +1,142 @@
+{
+  "schema_version": 1,
+  "diagram_type": "architecture",
+  "meta": {
+    "title": "手写数字生成器与字体制作器系统架构",
+    "locale": "zh-CN",
+    "output": "architecture.html",
+    "quality_profile": "showcase",
+    "viewBox": [1180, 560],
+    "views": [
+      {
+        "id": "table-pipeline",
+        "label": "填表与导出主链路",
+        "focus": ["user-input", "pdf-loader", "grid-controller", "prng-engine", "canvas-compositor", "jspdf-exporter"],
+        "note": "从导入空表 PDF、对齐行列标尺到随机手写合成与多页高清 PDF 导出。"
+      },
+      {
+        "id": "font-maker-pipeline",
+        "label": "三步拍照做字库",
+        "focus": ["photo-input", "font-maker", "glyph-store", "canvas-compositor"],
+        "note": "从实拍手写照片、背景抠图、连通域自动框字、按行标注到导出自定义字形库。"
+      }
+    ]
+  },
+  "components": [
+    {
+      "id": "user-input",
+      "type": "external",
+      "label": "空表 PDF / 范例工程",
+      "sublabel": "体温表 / 视力表 / 自定义",
+      "pos": [35, 190],
+      "size": [150, 64]
+    },
+    {
+      "id": "photo-input",
+      "type": "external",
+      "label": "实拍手写数字照片",
+      "sublabel": "白纸黑字 0-9 与小数点",
+      "pos": [35, 390],
+      "size": [150, 64]
+    },
+    {
+      "id": "pdf-loader",
+      "type": "frontend",
+      "label": "PDF.js 页面解析器",
+      "sublabel": "152 DPI 厘米级坐标映射",
+      "pos": [265, 190],
+      "size": [155, 64]
+    },
+    {
+      "id": "font-maker",
+      "type": "frontend",
+      "label": "三步式字体制作器",
+      "sublabel": "容差抠图 · BFS框字 · 标注",
+      "pos": [265, 390],
+      "size": [155, 64]
+    },
+    {
+      "id": "grid-controller",
+      "type": "frontend",
+      "label": "标尺与内容控制器",
+      "sublabel": "红十字起点 · 蓝列线 · 绿尺",
+      "pos": [500, 190],
+      "size": [160, 64]
+    },
+    {
+      "id": "glyph-store",
+      "type": "database",
+      "label": "多变体实拍字形库",
+      "sublabel": "142+ 原生 RGBA 透明字形",
+      "pos": [500, 390],
+      "size": [160, 64]
+    },
+    {
+      "id": "prng-engine",
+      "type": "backend",
+      "label": "Mulberry32 仿真引擎",
+      "sublabel": "位置 / 旋转 / 笔压 / 字距",
+      "pos": [745, 190],
+      "size": [160, 64]
+    },
+    {
+      "id": "canvas-compositor",
+      "type": "backend",
+      "label": "HTML5 Canvas 合成器",
+      "sublabel": "多通道笔锋叠印与实时预览",
+      "pos": [745, 390],
+      "size": [160, 64]
+    },
+    {
+      "id": "jspdf-exporter",
+      "type": "cloud",
+      "label": "jsPDF 多页导出器",
+      "sublabel": "分页渲染进度条与打印输出",
+      "pos": [985, 390],
+      "size": [155, 64]
+    }
+  ],
+  "boundaries": [
+    {
+      "kind": "region",
+      "label": "纯前端零依赖离线工作台 (Browser Runtime)",
+      "wraps": ["pdf-loader", "font-maker", "grid-controller", "glyph-store", "prng-engine", "canvas-compositor", "jspdf-exporter"]
+    }
+  ],
+  "connections": [
+    { "id": "in-to-pdf", "from": "user-input", "to": "pdf-loader", "variant": "emphasis" },
+    { "id": "pdf-to-grid", "from": "pdf-loader", "to": "grid-controller", "label": "底图流", "variant": "emphasis" },
+    { "id": "grid-to-prng", "from": "grid-controller", "to": "prng-engine", "label": "行列与数位", "variant": "emphasis" },
+    { "id": "photo-to-fm", "from": "photo-input", "to": "font-maker" },
+    { "id": "fm-to-store", "from": "font-maker", "to": "glyph-store", "label": "导出字库" },
+    { "id": "store-to-canvas", "from": "glyph-store", "to": "canvas-compositor", "label": "采样字形" },
+    { "id": "prng-to-canvas", "from": "prng-engine", "to": "canvas-compositor", "label": "仿射变换矩阵", "fromSide": "bottom", "toSide": "top", "variant": "emphasis", "labelDy": 68 },
+    { "id": "canvas-to-jspdf", "from": "canvas-compositor", "to": "jspdf-exporter", "label": "多页导出", "variant": "emphasis" }
+  ],
+  "cards": [
+    {
+      "dot": "cyan",
+      "title": "精准表格定位与双模输入",
+      "items": [
+        "支持任意多页空表 PDF 解析，提供红十字起点、蓝列线与绿尺直观拖拽对齐",
+        "支持「随机填写数字（数位槽顺序定制）」与「手动电子表格逐格输入」双模式"
+      ]
+    },
+    {
+      "dot": "emerald",
+      "title": "四大维度手写仿真引擎",
+      "items": [
+        "基于 Mulberry32 确定性随机种子，支持一键换一批字迹与单模块摇号",
+        "独立控制单元格偏移/缩放/旋转、单字位置/字距、笔画加粗/灰度/拉伸与小数点随机"
+      ]
+    },
+    {
+      "dot": "violet",
+      "title": "三步式拍照自制字库",
+      "items": [
+        "第一步容差去底抠图、第二步 BFS 连通域自动框字、第三步红框批量标注导出",
+        "内置 142 个高清实拍无底噪手写字形，开箱即用"
+      ]
+    }
+  ]
+}
