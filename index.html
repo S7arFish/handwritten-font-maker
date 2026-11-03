@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>手写数字生成器</title>
-  <link rel="stylesheet" href="styles.css?v=9">
+  <link rel="stylesheet" href="styles.css?v=10">
 </head>
 <body>
   <div class="app-shell">
@@ -57,6 +57,14 @@
             <input type="checkbox" id="chkHideLegend">
             <span>隐藏图例</span>
           </label>
+          <div class="drag-mode-bar" role="group" aria-label="画布鼠标拖动模式">
+            <span class="drag-mode-label">拖动模式:</span>
+            <button type="button" class="drag-mode-btn active" data-drag-mode="char" title="直接点住任意一个手写数字字符单独拖动位置">单字</button>
+            <button type="button" class="drag-mode-btn" data-drag-mode="cell" title="点住任意一格的数字整体单独拖动">单格</button>
+            <button type="button" class="drag-mode-btn" data-drag-mode="row" title="点住任意一行直接整行上下/左右单独拖动">整行</button>
+            <button type="button" class="drag-mode-btn" data-drag-mode="pan" title="左键拖动平移画布视野（其他模式下拖空白处或按中键也可平移画布）">画布</button>
+            <button type="button" class="icon-btn" id="btnResetCustomOffsets" title="重置所有单字/单格/单行/单列的独立拖动微调" aria-label="重置独立拖动">↺</button>
+          </div>
         </div>
 
         <div class="toolbar-center">
@@ -300,6 +308,12 @@
             <div class="stage-overlay" id="stageOverlay">
               <!-- Blue Column Guides -->
               <div id="colGuidesContainer"></div>
+              <!-- Purple/Teal Row Guides -->
+              <div id="rowGuidesContainer"></div>
+              <!-- Hover/Active Hit Box for Single Character / Cell / Row Dragging -->
+              <div class="hover-hit-box" id="hoverHitBox" hidden>
+                <span class="hover-hit-tag" id="hoverHitTag">点击拖动</span>
+              </div>
               <!-- Red Origin Handle -->
               <div class="origin-handle" id="originHandle">
                 <div class="origin-crosshair">✚</div>
@@ -325,7 +339,8 @@
           </div>
 
           <div class="floating-hud">
-            <div>鼠标左键/中键：拖动画面</div>
+            <div>左键点数字：单独拖动单字 / 单格 / 整行</div>
+            <div>左键拖空白处 / 中键：拖动画面</div>
             <div>滚轮：缩放画面</div>
           </div>
         </div>
@@ -520,10 +535,10 @@
   </dialog>
 
   <!-- Local Bundled Assets & Libraries -->
-  <script src="vendor/pdf.min.js?v=9"></script>
-  <script src="vendor/jspdf.umd.min.js?v=9"></script>
-  <script src="assets/default-font.js?v=9"></script>
-  <script src="assets/examples-data.js?v=9"></script>
-  <script src="app.js?v=9"></script>
+  <script src="vendor/pdf.min.js?v=10"></script>
+  <script src="vendor/jspdf.umd.min.js?v=10"></script>
+  <script src="assets/default-font.js?v=10"></script>
+  <script src="assets/examples-data.js?v=10"></script>
+  <script src="app.js?v=10"></script>
 </body>
 </html>

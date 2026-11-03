@@ -184,6 +184,8 @@
     showRowRuler: false,
     normalizeFontSize: true,
     scratchEffect: false,
+    dragMode: 'char', // 'char' | 'cell' | 'row' | 'pan'
+    hitBoxes: { chars: [], cells: [], rows: [] },
     globalSeed: 20261103,
     clipboardSection: {},
     config: {
@@ -195,7 +197,10 @@
       rows: 24,
       cols: 10,
       activeCols: [1, 3, 5, 7, 9],
-      colOffsets: {}, // optional per-column custom X offset in cm
+      colOffsets: {}, // per-column custom X offset in cm
+      rowOffsets: {}, // per-row custom { dx, dy } offset in px
+      cellOffsets: {}, // per-cell custom { dx, dy } offset in px
+      charOffsets: {}, // per-character custom { dx, dy } offset in px
       pageConfigs: {}, // per-page overrides for startX, startY, rows
       fillMode: 'random', // 'random' | 'manual'
       visionPreset: false,
@@ -684,7 +689,7 @@
     return out;
   }
 
-  function drawHandwrittenString(ctx, text, cellCenterX, cellCenterY, colWidthPx, rowHeightPx, rng, allowScratch) {
+  function drawHandwrittenString(ctx, text, cellCenterX, cellCenterY, colWidthPx, rowHeightPx, rng, allowScratch, hitCtx) {
     const font = fontsRegistry[activeFontIndex];
     if (!font || !text) return;
 
@@ -697,7 +702,10 @@
     const cellScale = Math.max(0.45, 1 + randRange(rng, cfg.cellRandom.scale));
     const cellRotDeg = randRange(rng, cfg.cellRandom.rotate);
 
-    ctx.translate(cellCenterX + cellDx, cellCenterY + cellDy);
+    const originX = cellCenterX + cellDx;
+    const originY = cellCenterY + cellDy;
+
+    ctx.translate(originX, originY);
     ctx.rotate((cellRotDeg * Math.PI) / 180);
     ctx.scale(cellScale, cellScale);
 
@@ -710,7 +718,7 @@
       ctx.scale(0.84, 0.84);
       const wrongLast = String(Math.floor(1 + rng() * 9));
       const wrongText = text.slice(0, -1) + wrongLast;
-      drawCharactersSequence(ctx, font, wrongText, rowHeightPx, rng);
+      drawCharactersSequence(ctx, font, wrongText, rowHeightPx, rng, null);
       // Draw realistic pen scratch lines over the mistake
       ctx.strokeStyle = 'rgba(22, 22, 22, 0.88)';
       ctx.lineWidth = 1.9;
@@ -726,11 +734,18 @@
       ctx.scale(0.9, 0.9);
     }
 
-    drawCharactersSequence(ctx, font, text, rowHeightPx, rng);
+    drawCharactersSequence(
+      ctx,
+      font,
+      text,
+      rowHeightPx,
+      rng,
+      hitCtx ? { ...hitCtx, originX, originY, cellScale } : null
+    );
     ctx.restore();
   }
 
-  function drawCharactersSequence(ctx, font, text, rowHeightPx, rng) {
+  function drawCharactersSequence(ctx, font, text, rowHeightPx, rng, hitCtx) {
     const cfg = state.config;
     const chars = Array.from(text);
     const baseDigitHeight = rowHeightPx * 0.56;
@@ -772,6 +787,7 @@
       const advance = (isDot ? Math.max(5.5, drawW * 0.85) : drawW * 0.88 + 1.2) + kerning;
 
       pickedItems.push({
+        charIdx: i,
         ch,
         isDot,
         g,
@@ -788,13 +804,16 @@
     }
 
     let cursorX = -totalAdvance / 2 + cfg.cellPad * PX_PER_CM * 0.5;
+    let cellMinX = Infinity, cellMinY = Infinity, cellMaxX = -Infinity, cellMaxY = -Infinity;
 
     for (const item of pickedItems) {
       ctx.save();
-      const cx = cursorX + item.advance / 2 + item.dx;
-      const cy = item.isDot
-        ? baseDigitHeight * 0.26 + item.dy
-        : item.dy;
+      const charKey = hitCtx ? `${hitCtx.page}-${hitCtx.r}-${hitCtx.c}-${item.charIdx}` : null;
+      const userCharOff = (charKey && cfg.charOffsets && cfg.charOffsets[charKey]) || { dx: 0, dy: 0 };
+      const scaleInv = hitCtx && hitCtx.cellScale ? 1 / hitCtx.cellScale : 1;
+
+      const cx = cursorX + item.advance / 2 + item.dx + userCharOff.dx * scaleInv;
+      const cy = (item.isDot ? baseDigitHeight * 0.26 + item.dy : item.dy) + userCharOff.dy * scaleInv;
 
       ctx.translate(cx, cy);
       if (item.rotDeg) {
@@ -813,7 +832,49 @@
       }
 
       ctx.restore();
+
+      if (hitCtx && hitCtx.collect) {
+        const absCx = hitCtx.originX + cx * hitCtx.cellScale;
+        const absCy = hitCtx.originY + cy * hitCtx.cellScale;
+        const bw = Math.max(12, item.drawW * hitCtx.cellScale + 4);
+        const bh = Math.max(14, item.drawH * hitCtx.cellScale + 4);
+        const bx = absCx - bw / 2;
+        const by = absCy - bh / 2;
+        state.hitBoxes.chars.push({
+          type: 'char',
+          key: charKey,
+          page: hitCtx.page,
+          r: hitCtx.r,
+          c: hitCtx.c,
+          charIdx: item.charIdx,
+          ch: item.ch,
+          x: bx,
+          y: by,
+          w: bw,
+          h: bh
+        });
+        if (bx < cellMinX) cellMinX = bx;
+        if (by < cellMinY) cellMinY = by;
+        if (bx + bw > cellMaxX) cellMaxX = bx + bw;
+        if (by + bh > cellMaxY) cellMaxY = by + bh;
+      }
+
       cursorX += item.advance;
+    }
+
+    if (hitCtx && hitCtx.collect && cellMinX < Infinity) {
+      state.hitBoxes.cells.push({
+        type: 'cell',
+        key: `${hitCtx.page}-${hitCtx.r}-${hitCtx.c}`,
+        page: hitCtx.page,
+        r: hitCtx.r,
+        c: hitCtx.c,
+        text,
+        x: cellMinX - 3,
+        y: cellMinY - 3,
+        w: cellMaxX - cellMinX + 6,
+        h: cellMaxY - cellMinY + 6
+      });
     }
   }
 
@@ -843,13 +904,38 @@
     const rows = pg.rows;
     const cols = state.config.cols;
 
+    const collectHits = seedOffset === 0 && pageIndex1Based === state.currentPage;
+    if (collectHits) {
+      state.hitBoxes = { chars: [], cells: [], rows: [] };
+    }
+
     for (let r = 0; r < rows; r++) {
-      const cellCenterY = startYPx + (r + 0.5) * rowHeightPx;
+      const rowKey = `${pageIndex1Based}-${r}`;
+      const rowOff = (state.config.rowOffsets && state.config.rowOffsets[rowKey]) || { dx: 0, dy: 0 };
+      const baseCellCenterY = startYPx + (r + 0.5) * rowHeightPx + rowOff.dy;
+
+      if (collectHits) {
+        state.hitBoxes.rows.push({
+          type: 'row',
+          key: rowKey,
+          page: pageIndex1Based,
+          r,
+          x: startXPx + rowOff.dx,
+          y: baseCellCenterY - rowHeightPx * 0.48,
+          w: cols * colWidthPx,
+          h: rowHeightPx * 0.96
+        });
+      }
+
       for (let c = 1; c <= cols; c++) {
         if (!state.config.activeCols.includes(c)) continue;
         const customColOffsetCm = (state.config.colOffsets && state.config.colOffsets[String(c)]) || 0;
+        const cellKey = `${pageIndex1Based}-${r}-${c}`;
+        const cellOff = (state.config.cellOffsets && state.config.cellOffsets[cellKey]) || { dx: 0, dy: 0 };
+
         const colLeftPx = startXPx + (c - 1) * colWidthPx + customColOffsetCm * PX_PER_CM;
-        const cellCenterX = colLeftPx + colWidthPx * 0.5;
+        const cellCenterX = colLeftPx + colWidthPx * 0.5 + rowOff.dx + cellOff.dx;
+        const cellCenterY = baseCellCenterY + cellOff.dy;
 
         const cellSeed =
           state.globalSeed +
@@ -859,7 +945,12 @@
           c * 37;
         const rng = mulberry32(cellSeed);
         const text = getCellText(pageIndex1Based, r, c, rng);
-        drawHandwrittenString(ctx, text, cellCenterX, cellCenterY, colWidthPx, rowHeightPx, rng, true);
+        drawHandwrittenString(ctx, text, cellCenterX, cellCenterY, colWidthPx, rowHeightPx, rng, true, {
+          collect: collectHits,
+          page: pageIndex1Based,
+          r,
+          c
+        });
       }
     }
   }
@@ -912,24 +1003,19 @@
       badge.textContent = '点击拖动';
       line.appendChild(badge);
 
-      // Dragging individual blue column guide adjusts custom column offset (or startX for col 1)
+      // Dragging individual blue column guide adjusts ONLY that column's offset (never all columns together)
       line.addEventListener('pointerdown', (e) => {
         e.stopPropagation();
         e.preventDefault();
         line.setPointerCapture(e.pointerId);
         const startClientX = e.clientX;
         const scale = state.zoom / 100;
-        const initStartX = pg.startX;
         const initCustom = (state.config.colOffsets && state.config.colOffsets[String(c)]) || 0;
 
         const onMove = (ev) => {
           const dxCm = (ev.clientX - startClientX) / (PX_PER_CM * scale);
-          if (c === 1) {
-            setPageGridParam('startX', Number(Math.max(0.2, initStartX + dxCm).toFixed(2)));
-          } else {
-            if (!state.config.colOffsets) state.config.colOffsets = {};
-            state.config.colOffsets[String(c)] = Number((initCustom + dxCm).toFixed(2));
-          }
+          if (!state.config.colOffsets) state.config.colOffsets = {};
+          state.config.colOffsets[String(c)] = Number((initCustom + dxCm).toFixed(2));
           syncAllControlsFromState();
           renderCurrentPage();
         };
@@ -943,6 +1029,69 @@
       });
 
       guidesContainer.appendChild(line);
+    }
+
+    // 2b. Per-Row Drag Handles on the left side of each row
+    const rowGuidesContainer = document.getElementById('rowGuidesContainer');
+    if (rowGuidesContainer) {
+      rowGuidesContainer.innerHTML = '';
+      const tableWidthPx = state.config.cols * colWidthPx;
+      for (let r = 1; r <= pg.rows; r++) {
+        const rowKey = `${state.currentPage}-${r}`;
+        const rowOff = (state.config.rowOffsets && state.config.rowOffsets[rowKey]) || { dx: 0, dy: 0 };
+        const rowDxPx = (rowOff.dx || 0) * PX_PER_CM;
+        const rowDyPx = (rowOff.dy || 0) * PX_PER_CM;
+        const baseRowCenterY = startYPx + (r - 0.5) * rowHeightPx + rowDyPx;
+
+        const rowHandle = document.createElement('div');
+        rowHandle.className = 'row-guide-handle';
+        rowHandle.style.left = `${Math.max(4, startXPx - 44 + rowDxPx)}px`;
+        rowHandle.style.top = `${baseRowCenterY - 10}px`;
+
+        const rBadge = document.createElement('div');
+        rBadge.className = 'row-guide-badge';
+        rBadge.textContent = `↕ 行${r}`;
+        rowHandle.appendChild(rBadge);
+
+        const rLine = document.createElement('div');
+        rLine.className = 'row-guide-line';
+        rLine.style.width = `${tableWidthPx + 44}px`;
+        rowHandle.appendChild(rLine);
+
+        rowHandle.addEventListener('pointerdown', (e) => {
+          e.stopPropagation();
+          e.preventDefault();
+          rowHandle.setPointerCapture(e.pointerId);
+          rowHandle.classList.add('dragging');
+          const startClientX = e.clientX;
+          const startClientY = e.clientY;
+          const scale = state.zoom / 100;
+          const curOff = (state.config.rowOffsets && state.config.rowOffsets[rowKey]) || { dx: 0, dy: 0 };
+          const initDx = curOff.dx || 0;
+          const initDy = curOff.dy || 0;
+
+          const onMove = (ev) => {
+            const dxCm = (ev.clientX - startClientX) / (PX_PER_CM * scale);
+            const dyCm = (ev.clientY - startClientY) / (PX_PER_CM * scale);
+            if (!state.config.rowOffsets) state.config.rowOffsets = {};
+            state.config.rowOffsets[rowKey] = {
+              dx: Number((initDx + dxCm).toFixed(3)),
+              dy: Number((initDy + dyCm).toFixed(3))
+            };
+            renderCurrentPage();
+          };
+          const onUp = () => {
+            rowHandle.classList.remove('dragging');
+            rowHandle.removeEventListener('pointermove', onMove);
+            rowHandle.removeEventListener('pointerup', onUp);
+            pushHistory();
+          };
+          rowHandle.addEventListener('pointermove', onMove);
+          rowHandle.addEventListener('pointerup', onUp);
+        });
+
+        rowGuidesContainer.appendChild(rowHandle);
+      }
     }
 
     // 3. Green Column Width Ruler & Row Height Ruler
@@ -1018,6 +1167,9 @@
     state.projectPath = ex.path;
     state.config = deepClone(ex.config);
     state.config.colOffsets = {};
+    state.config.rowOffsets = {};
+    state.config.cellOffsets = {};
+    state.config.charOffsets = {};
 
     if (ex.config.fillMode === 'manual') {
       populateManualTable('vision');
@@ -2227,32 +2379,188 @@
       rowRuler.addEventListener('pointerup', onUp);
     });
 
-    // Viewport Panning & Wheel Zooming
+    // Drag Mode Selector Buttons ('char' | 'cell' | 'row' | 'pan') & Reset Custom Offsets
+    document.querySelectorAll('.drag-mode-btn').forEach((btn) => {
+      btn.addEventListener('click', () => {
+        document.querySelectorAll('.drag-mode-btn').forEach((b) => b.classList.remove('active'));
+        btn.classList.add('active');
+        state.dragMode = btn.dataset.dragMode || 'char';
+        const hoverBox = document.getElementById('hoverHitBox');
+        if (hoverBox) hoverBox.hidden = true;
+      });
+    });
+
+    const btnResetCustomOffsets = document.getElementById('btnResetCustomOffsets');
+    if (btnResetCustomOffsets) {
+      btnResetCustomOffsets.addEventListener('click', () => {
+        state.config.colOffsets = {};
+        state.config.rowOffsets = {};
+        state.config.cellOffsets = {};
+        state.config.charOffsets = {};
+        const hoverBox = document.getElementById('hoverHitBox');
+        if (hoverBox) hoverBox.hidden = true;
+        pushHistory();
+        renderCurrentPage();
+      });
+    }
+
+    // Viewport Hit-Test Dragging (Per-Char / Per-Cell / Per-Row) & Panning / Wheel Zooming
     const viewport = document.getElementById('canvasViewport');
+    const hoverHitBox = document.getElementById('hoverHitBox');
+    const hoverHitTag = document.getElementById('hoverHitTag');
     let isPanning = false;
     let panStartX = 0;
     let panStartY = 0;
+    let activeDragTarget = null;
+
+    const toStageCoords = (e) => {
+      const stage = document.getElementById('canvasStage');
+      if (!stage) return { x: 0, y: 0 };
+      const rect = stage.getBoundingClientRect();
+      const scale = state.zoom / 100;
+      return {
+        x: (e.clientX - rect.left) / scale,
+        y: (e.clientY - rect.top) / scale
+      };
+    };
+
+    const findHitTarget = (x, y) => {
+      if (state.dragMode === 'pan' || !state.hitBoxes) return null;
+      const hitInList = (list, pad = 4) => {
+        if (!list) return null;
+        for (let i = list.length - 1; i >= 0; i--) {
+          const b = list[i];
+          if (x >= b.x - pad && x <= b.x + b.w + pad && y >= b.y - pad && y <= b.y + b.h + pad) {
+            return b;
+          }
+        }
+        return null;
+      };
+      if (state.dragMode === 'char') {
+        const chHit = hitInList(state.hitBoxes.chars, 4);
+        if (chHit) return { type: 'char', box: chHit, label: `拖动单字 "${chHit.ch}" (行${chHit.r}列${chHit.c})` };
+        const cellHit = hitInList(state.hitBoxes.cells, 2);
+        if (cellHit) return { type: 'cell', box: cellHit, label: `拖动单格 "${cellHit.text}" (行${cellHit.r}列${cellHit.c})` };
+      } else if (state.dragMode === 'cell') {
+        const cellHit = hitInList(state.hitBoxes.cells, 4);
+        if (cellHit) return { type: 'cell', box: cellHit, label: `拖动单格 "${cellHit.text}" (行${cellHit.r}列${cellHit.c})` };
+      } else if (state.dragMode === 'row') {
+        const rowHit = hitInList(state.hitBoxes.rows, 2);
+        if (rowHit) return { type: 'row', box: rowHit, label: `拖动整行 (第 ${rowHit.r} 行)` };
+      }
+      return null;
+    };
+
+    const showHoverBox = (target) => {
+      if (!hoverHitBox || !hoverHitTag) return;
+      if (!target || state.hideLegend) {
+        hoverHitBox.hidden = true;
+        return;
+      }
+      hoverHitBox.hidden = false;
+      hoverHitBox.style.left = `${target.box.x - 2}px`;
+      hoverHitBox.style.top = `${target.box.y - 2}px`;
+      hoverHitBox.style.width = `${target.box.w + 4}px`;
+      hoverHitBox.style.height = `${target.box.h + 4}px`;
+      hoverHitTag.textContent = target.label;
+    };
 
     viewport.addEventListener('pointerdown', (e) => {
       if (e.button !== 0 && e.button !== 1) return;
+
+      // Left-click: check if pointer hits a draggable digit/cell/row first
+      if (e.button === 0 && state.dragMode !== 'pan') {
+        const pt = toStageCoords(e);
+        const hit = findHitTarget(pt.x, pt.y);
+        if (hit) {
+          e.preventDefault();
+          viewport.setPointerCapture(e.pointerId);
+          const mapName = hit.type === 'char' ? 'charOffsets' : hit.type === 'cell' ? 'cellOffsets' : 'rowOffsets';
+          if (!state.config[mapName]) state.config[mapName] = {};
+          const cur = state.config[mapName][hit.box.key] || { dx: 0, dy: 0 };
+          activeDragTarget = {
+            type: hit.type,
+            mapName,
+            key: hit.box.key,
+            label: hit.label,
+            startClientX: e.clientX,
+            startClientY: e.clientY,
+            initDx: cur.dx || 0,
+            initDy: cur.dy || 0,
+            initBox: { ...hit.box }
+          };
+          viewport.style.cursor = 'grabbing';
+          showHoverBox(hit);
+          return;
+        }
+      }
+
       isPanning = true;
       viewport.classList.add('panning');
       viewport.setPointerCapture(e.pointerId);
       panStartX = e.clientX - state.panX;
       panStartY = e.clientY - state.panY;
     });
+
     viewport.addEventListener('pointermove', (e) => {
-      if (!isPanning) return;
-      state.panX = e.clientX - panStartX;
-      state.panY = e.clientY - panStartY;
-      updateStageTransform();
+      if (activeDragTarget) {
+        const scale = state.zoom / 100;
+        const dxPx = (e.clientX - activeDragTarget.startClientX) / scale;
+        const dyPx = (e.clientY - activeDragTarget.startClientY) / scale;
+        const dxCm = dxPx / PX_PER_CM;
+        const dyCm = dyPx / PX_PER_CM;
+        state.config[activeDragTarget.mapName][activeDragTarget.key] = {
+          dx: Number((activeDragTarget.initDx + dxCm).toFixed(3)),
+          dy: Number((activeDragTarget.initDy + dyCm).toFixed(3))
+        };
+        renderCurrentPage();
+        showHoverBox({
+          type: activeDragTarget.type,
+          label: activeDragTarget.label,
+          box: {
+            x: activeDragTarget.initBox.x + dxPx,
+            y: activeDragTarget.initBox.y + dyPx,
+            w: activeDragTarget.initBox.w,
+            h: activeDragTarget.initBox.h
+          }
+        });
+        return;
+      }
+
+      if (isPanning) {
+        state.panX = e.clientX - panStartX;
+        state.panY = e.clientY - panStartY;
+        updateStageTransform();
+        return;
+      }
+
+      // Hover feedback when moving mouse over digits/cells/rows
+      const pt = toStageCoords(e);
+      const hit = findHitTarget(pt.x, pt.y);
+      if (hit) {
+        viewport.style.cursor = 'move';
+        showHoverBox(hit);
+      } else {
+        viewport.style.cursor = state.dragMode === 'pan' ? 'grab' : 'default';
+        showHoverBox(null);
+      }
     });
+
     const endPan = () => {
+      if (activeDragTarget) {
+        activeDragTarget = null;
+        viewport.style.cursor = 'default';
+        pushHistory();
+        return;
+      }
       isPanning = false;
       viewport.classList.remove('panning');
     };
     viewport.addEventListener('pointerup', endPan);
     viewport.addEventListener('pointercancel', endPan);
+    viewport.addEventListener('pointerleave', () => {
+      if (!activeDragTarget) showHoverBox(null);
+    });
 
     viewport.addEventListener(
       'wheel',

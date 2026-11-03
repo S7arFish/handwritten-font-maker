@@ -386,6 +386,46 @@ dialog::backdrop {
   margin-left: 6px;
 }
 
+.drag-mode-bar {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  background: #f1f5f9;
+  border: 1px solid #e2e8f0;
+  border-radius: 6px;
+  padding: 2px 4px;
+  margin-left: 6px;
+}
+
+.drag-mode-label {
+  font-size: 11.5px;
+  color: #475569;
+  padding: 0 4px;
+  white-space: nowrap;
+}
+
+.drag-mode-btn {
+  border: none;
+  background: transparent;
+  color: #334155;
+  font-size: 11.5px;
+  padding: 3px 8px;
+  border-radius: 4px;
+  cursor: pointer;
+  white-space: nowrap;
+  transition: background 0.12s, color 0.12s;
+}
+
+.drag-mode-btn:hover {
+  background: #e2e8f0;
+}
+
+.drag-mode-btn.active {
+  background: var(--brand-color);
+  color: #ffffff;
+  font-weight: 600;
+}
+
 .page-nav {
   display: flex;
   align-items: center;
@@ -821,6 +861,69 @@ dialog::backdrop {
   white-space: nowrap;
   cursor: ew-resize;
   box-shadow: 0 2px 5px rgba(37, 99, 235, 0.3);
+}
+
+.row-guide-handle {
+  position: absolute;
+  pointer-events: auto;
+  cursor: move;
+  z-index: 16;
+  display: flex;
+  align-items: center;
+}
+
+.row-guide-badge {
+  background: #0d9488;
+  color: #fff;
+  padding: 1px 6px;
+  border-radius: 4px;
+  font-size: 10.5px;
+  white-space: nowrap;
+  box-shadow: 0 1px 4px rgba(13, 148, 136, 0.3);
+  opacity: 0.78;
+  transition: opacity 0.12s, transform 0.12s;
+}
+
+.row-guide-handle:hover .row-guide-badge {
+  opacity: 1;
+  transform: scale(1.06);
+}
+
+.row-guide-line {
+  position: absolute;
+  left: 42px;
+  height: 0;
+  border-top: 1.5px dashed rgba(13, 148, 136, 0.55);
+  pointer-events: none;
+  opacity: 0;
+  transition: opacity 0.12s;
+}
+
+.row-guide-handle:hover .row-guide-line,
+.row-guide-handle.dragging .row-guide-line {
+  opacity: 1;
+}
+
+.hover-hit-box {
+  position: absolute;
+  border: 1.5px dashed #1668dc;
+  background: rgba(22, 104, 220, 0.08);
+  border-radius: 3px;
+  pointer-events: none;
+  z-index: 25;
+}
+
+.hover-hit-tag {
+  position: absolute;
+  left: 0;
+  top: -20px;
+  background: #1668dc;
+  color: #fff;
+  font-size: 10.5px;
+  padding: 1px 5px;
+  border-radius: 3px;
+  white-space: nowrap;
+  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.2);
 }
 
 .ruler-handle {
