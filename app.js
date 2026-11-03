@@ -66,14 +66,190 @@
   }
 
   // =========================================================================
-  // Font Management & Glyph Image Cache
+  // Font Management, 6 Handwriting Styles & Dynamic CJK/Latin Glyph Synthesizer
   // =========================================================================
   const fontsRegistry = [];
   let activeFontIndex = 0;
 
-  async function loadFontFromData(fontData) {
+  const BUILTIN_HANDWRITE_STYLES = [
+    {
+      id: 'hybrid_hanzipen',
+      name: '默认实拍数字 + 翩翩手写中英 (推荐)',
+      useRealDigits: true,
+      primaryFont: '"HanziPen SC", "Hannotate SC", "Bradley Hand", "Noteworthy", "Kaiti SC", "STKaiti", cursive',
+      secondaryFont: '"Hannotate SC", "HanziPen SC", "Noteworthy", "Kaiti SC", cursive',
+      slantBias: -0.02
+    },
+    {
+      id: 'hannotate',
+      name: '清秀学生手札体 (中/英/数统一笔记风)',
+      useRealDigits: false,
+      primaryFont: '"Hannotate SC", "HanziPen SC", "Noteworthy", "Kaiti SC", cursive',
+      secondaryFont: '"HanziPen SC", "Hannotate SC", "Bradley Hand", cursive',
+      slantBias: 0.0
+    },
+    {
+      id: 'xingkai',
+      name: '潇洒行楷连笔体 (签字/评语/快写风)',
+      useRealDigits: false,
+      primaryFont: '"Xingkai SC", "LingWai SC", "Bradley Hand", "Snell Roundhand", "STKaiti", cursive',
+      secondaryFont: '"LingWai SC", "Xingkai SC", "Bradley Hand", cursive',
+      slantBias: -0.06
+    },
+    {
+      id: 'lingwai',
+      name: '锋芒钢笔凌慧体 (钢笔撇捺手写风)',
+      useRealDigits: false,
+      primaryFont: '"LingWai SC", "HanziPen SC", "Snell Roundhand", "Bradley Hand", cursive',
+      secondaryFont: '"HanziPen SC", "LingWai SC", "Noteworthy", cursive',
+      slantBias: -0.04
+    },
+    {
+      id: 'wawati',
+      name: '随性娃娃手写体 (圆润日常手写风)',
+      useRealDigits: false,
+      primaryFont: '"Wawati SC", "Hannotate SC", "Chalkboard SE", "Noteworthy", cursive',
+      secondaryFont: '"Hannotate SC", "Wawati SC", "Chalkboard SE", cursive',
+      slantBias: 0.02
+    },
+    {
+      id: 'kaiti',
+      name: '工整考卷正楷体 (标准楷书/衡水体英文)',
+      useRealDigits: false,
+      primaryFont: '"Kaiti SC", "STKaiti", "KaiTi", "Noteworthy", "Bradley Hand", serif',
+      secondaryFont: '"STKaiti", "Kaiti SC", "HanziPen SC", serif',
+      slantBias: -0.01
+    }
+  ];
+
+  // Tint an existing image glyph to a target ink color (for colored pen inks on real digit PNGs)
+  function createTintedGlyphVariant(g, inkColor) {
+    const c = document.createElement('canvas');
+    c.width = Math.max(1, g.w);
+    c.height = Math.max(1, g.h);
+    const ctx = c.getContext('2d');
+    ctx.drawImage(g.img, 0, 0, c.width, c.height);
+    ctx.globalCompositeOperation = 'source-in';
+    ctx.fillStyle = inkColor;
+    ctx.fillRect(0, 0, c.width, c.height);
+    return {
+      w: g.w,
+      h: g.h,
+      img: c,
+      isSynthesized: false
+    };
+  }
+
+  // Synthesize 5 organic handwritten variants for ANY Chinese character, English letter, symbol, or digit
+  function getGlyphVariantsForChar(font, ch, inkColor = '#161616') {
+    if (!font || !ch) return [];
+
+    // 1. Use photographed real digit glyphs when enabled
+    if (font.useRealDigits && font.glyphs && font.glyphs[ch] && font.glyphs[ch].length > 0) {
+      if (inkColor === '#161616') {
+        return font.glyphs[ch];
+      }
+      if (!font.tintedCache) font.tintedCache = {};
+      const tKey = `${inkColor}_${ch}`;
+      if (!font.tintedCache[tKey]) {
+        font.tintedCache[tKey] = font.glyphs[ch].map((g) => createTintedGlyphVariant(g, inkColor));
+      }
+      return font.tintedCache[tKey];
+    }
+
+    // 2. Otherwise synthesize & cache 5 organic stroke-perturbed variants on offscreen canvases
+    if (!font.synthCache) font.synthCache = {};
+    const cacheKey = `${inkColor}_${ch}`;
+    if (font.synthCache[cacheKey]) {
+      return font.synthCache[cacheKey];
+    }
+
+    const variants = [];
+    const W = 76;
+    const H = 64;
+    const isCJK = /[\u3000-\u9fff\uff00-\uffef]/.test(ch);
+    const baseFontPx = isCJK ? 41 : 43;
+    const slantBias = font.slantBias || 0;
+
+    const microTransforms = [
+      { famIdx: 0, sx: 1.0, sy: 1.0, kx: slantBias - 0.03, ky: -0.01, press: 0.22 },
+      { famIdx: 0, sx: 0.97, sy: 1.03, kx: slantBias + 0.02, ky: 0.015, press: 0.30 },
+      { famIdx: 0, sx: 1.03, sy: 0.98, kx: slantBias - 0.05, ky: -0.015, press: 0.18 },
+      { famIdx: 1, sx: 0.99, sy: 1.01, kx: slantBias + 0.01, ky: 0.01, press: 0.26 },
+      { famIdx: 0, sx: 0.98, sy: 1.02, kx: slantBias - 0.02, ky: 0.02, press: 0.32 }
+    ];
+
+    for (let v = 0; v < microTransforms.length; v++) {
+      const mt = microTransforms[v];
+      const fam = mt.famIdx === 1 && font.secondaryFont ? font.secondaryFont : font.primaryFont || '"HanziPen SC", "Kaiti SC", cursive';
+      const temp = document.createElement('canvas');
+      temp.width = W;
+      temp.height = H;
+      const tctx = temp.getContext('2d');
+
+      tctx.save();
+      tctx.translate(W / 2, H / 2 + 2);
+      tctx.transform(mt.sx, mt.ky, mt.kx, mt.sy, 0, 0);
+      tctx.font = `${baseFontPx}px ${fam}`;
+      tctx.textAlign = 'center';
+      tctx.textBaseline = 'middle';
+      tctx.fillStyle = inkColor;
+      tctx.fillText(ch, 0, 0);
+
+      // Subtle second ink-pressure pass for gel-pen / fountain-pen stroke texture
+      tctx.globalAlpha = mt.press;
+      tctx.fillText(ch, 0.45, 0.25);
+      tctx.restore();
+
+      // Measure horizontal ink bounds so proportional characters ('i', 'm', '汉', ',') have natural width
+      // while keeping the unified vertical em-frame (y = 4..60, h = 56) so baselines align 100%!
+      const imgData = tctx.getImageData(0, 0, W, H).data;
+      let minX = W;
+      let maxX = 0;
+      for (let y = 0; y < H; y++) {
+        for (let x = 0; x < W; x++) {
+          if (imgData[(y * W + x) * 4 + 3] > 16) {
+            if (x < minX) minX = x;
+            if (x > maxX) maxX = x;
+          }
+        }
+      }
+
+      if (minX > maxX) {
+        minX = Math.floor(W * 0.35);
+        maxX = Math.ceil(W * 0.65);
+      }
+
+      const padX = isCJK ? 2 : 3;
+      const cropX = Math.max(0, minX - padX);
+      const cropW = Math.max(8, Math.min(W - cropX, maxX - minX + padX * 2 + 1));
+      const cropY = 4;
+      const cropH = 56;
+
+      const outCanvas = document.createElement('canvas');
+      outCanvas.width = cropW;
+      outCanvas.height = cropH;
+      const outCtx = outCanvas.getContext('2d');
+      outCtx.drawImage(temp, cropX, cropY, cropW, cropH, 0, 0, cropW, cropH);
+
+      variants.push({
+        w: cropW,
+        h: cropH,
+        img: outCanvas,
+        isSynthesized: true,
+        isCJK
+      });
+    }
+
+    font.synthCache[cacheKey] = variants;
+    return variants;
+  }
+
+  async function loadFontFromData(fontData, isCustomExport = false) {
     const loadedGlyphs = {};
-    const labels = ['1', '2', '3', '4', '5', '6', '7', '8', '9', '0', '.'];
+    const labels = Object.keys((fontData && fontData.glyphs) || {
+      '1': [], '2': [], '3': [], '4': [], '5': [], '6': [], '7': [], '8': [], '9': [], '0': [], '.': []
+    });
     const promises = [];
 
     for (const k of labels) {
@@ -99,15 +275,43 @@
     }
     await Promise.all(promises);
     const totalCount = Object.values(loadedGlyphs).reduce((acc, v) => acc + v.length, 0);
-    const entry = {
-      name: fontData.name || `自定义手写字体 #${fontsRegistry.length + 1}`,
-      glyphs: loadedGlyphs,
-      totalCount
-    };
-    fontsRegistry.push(entry);
-    activeFontIndex = fontsRegistry.length - 1;
+
+    if (!isCustomExport && fontsRegistry.length === 0) {
+      // Populate all 6 built-in handwriting styles (Style 0 uses real photographed digits + CJK/Latin synth)
+      BUILTIN_HANDWRITE_STYLES.forEach((st, idx) => {
+        fontsRegistry.push({
+          id: st.id,
+          name: st.name,
+          useRealDigits: st.useRealDigits,
+          primaryFont: st.primaryFont,
+          secondaryFont: st.secondaryFont,
+          slantBias: st.slantBias,
+          glyphs: idx === 0 ? loadedGlyphs : {},
+          totalCount: idx === 0 ? `${totalCount}实拍+全字库中英` : '全字库汉字/英语/数字',
+          synthCache: {},
+          tintedCache: {}
+        });
+      });
+      activeFontIndex = 0;
+    } else {
+      const entry = {
+        id: `custom_${fontsRegistry.length}`,
+        name: fontData.name || `自定义手写字体 #${fontsRegistry.length + 1}`,
+        useRealDigits: true,
+        primaryFont: BUILTIN_HANDWRITE_STYLES[0].primaryFont,
+        secondaryFont: BUILTIN_HANDWRITE_STYLES[0].secondaryFont,
+        slantBias: -0.02,
+        glyphs: loadedGlyphs,
+        totalCount: `${totalCount}实拍+全字库中英`,
+        synthCache: {},
+        tintedCache: {}
+      };
+      fontsRegistry.push(entry);
+      activeFontIndex = fontsRegistry.length - 1;
+    }
+
     refreshFontSelectUI();
-    return entry;
+    return fontsRegistry[activeFontIndex];
   }
 
   function refreshFontSelectUI() {
@@ -117,14 +321,14 @@
     fontsRegistry.forEach((f, idx) => {
       const opt = document.createElement('option');
       opt.value = String(idx);
-      opt.textContent = `${f.name} (${f.totalCount}个字形)`;
+      opt.textContent = `${f.name}`;
       sel.appendChild(opt);
     });
     sel.value = String(activeFontIndex);
     const active = fontsRegistry[activeFontIndex];
     const statusGlyph = document.getElementById('statusGlyphCount');
     if (statusGlyph && active) {
-      statusGlyph.textContent = `当前字体: ${active.name} (${active.totalCount}个实拍字形)`;
+      statusGlyph.textContent = `当前字体: ${active.name} (${active.totalCount})`;
     }
   }
 
@@ -306,10 +510,97 @@
   }
 
   // =========================================================================
-  // Generate Realistic Manual Table Data (Vision 4.3-5.1 or Temp 36.1-36.9)
+  // Sample Essays & Realistic Manual Table Data Generators (Chinese + English + Digits)
   // =========================================================================
+  const SAMPLE_ARTICLES = {
+    cn_essay: `　　人间四月，春风拂过江南的青石板路，檐角的雨滴落在微湿的苔痕上，晕开一圈圈浅浅的涟漪。我合上书页，推开木窗，远山如黛，近水含烟，天地间仿佛铺开了一卷未干的水墨长卷。
+　　曾几何时，我们总在匆忙赶路，习惯了用键盘敲击冰冷的字符，却渐渐遗忘了笔尖摩挲纸背时的温度。一横一竖皆是风骨，一撇一捺尽藏心境。当墨水顺着笔锋渗入纸张纤维，那些或急促或舒缓的笔画，便成了时光最诚实的注脚。
+　　无论是实验室里严谨记录的每一组数据，还是深夜灯下摘抄的一句诗词，手写的痕迹总能穿过漫长的岁月，在泛黄的纸页间焕发出鲜活的生命力。
+　　少年读书如隙中窥月，中年读书如庭中望月，老年读书如台上玩月。愿我们始终保有提笔书写的从容与热爱，在方寸稿纸之间，写下属于自己的万里山河与烂漫春光。
+　　行路难，行路难，多歧路，今安在？长风破浪会有时，直挂云帆济沧海。明日复明日，明日何其多，把握当下每一刻，不负韶华与初心。`,
+    en_essay: `The Art of Handwritten Notes in the Digital Era
+In an age dominated by instant messaging and cloud documents, the simple act of putting pen to paper holds a timeless charm. Every curve of a letter and every subtle shift in ink pressure tells a personal story that uniform digital fonts can never fully replicate.
+First, handwriting deepens cognitive engagement. Studies in cognitive neuroscience consistently show that students who take handwritten notes retain conceptual structures far longer than those who type verbatim transcripts on a laptop.
+Second, a handwritten page carries warmth and authenticity. Whether it is a laboratory logbook from 1989, a carefully drafted English essay, or a personal margin note in a favorite novel, ink on paper bridges the gap between thought and craft.
+Let us keep a notebook on our desk, embrace the natural rhythm of pen strokes, and write with clarity, curiosity, and purpose every single day.
+Practice makes perfect: ABCDEFGHIJKLMNOPQRSTUVWXYZ & abcdefghijklmnopqrstuvwxyz (0123456789).`,
+    scratch_math: `【高等数学与大学物理推导演算草稿 - Page 1】
+1. 高斯积分与正态分布归一化证明 (Gaussian Integral):
+   令 I = ∫(-∞ → +∞) exp(-x^2) dx
+   则 I^2 = ∫∫ exp(-(x^2 + y^2)) dx dy
+   极坐标变换: x = r·cos(θ), y = r·sin(θ), J = r
+   I^2 = ∫(0→2π) dθ ∫(0→∞) r·exp(-r^2) dr = 2π · [ -1/2 exp(-r^2) ] = π
+   ∴ ∫ exp(-x^2) dx = √π ≈ 1.77245385
+
+2. 简谐振子阻尼运动方程 (Damped Harmonic Oscillator):
+   m·x'' + c·x' + k·x = 0   ==>   x'' + 2γ·x' + ω0^2·x = 0
+   特征方程: λ^2 + 2γλ + ω0^2 = 0,  判别式 Δ = 4(γ^2 - ω0^2)
+   欠阻尼条件 (γ < ω0):  ω_d = √(ω0^2 - γ^2),  x(t) = A·exp(-γt)·cos(ω_d·t + φ)
+
+3. 实验误差传递核算 (Error Propagation Check):
+   g = 4π^2 · L / T^2,   测得 L = 0.992 m,  T = 1.998 s
+   计算得 g = 9.806 m/s^2,  相对误差 δ = |9.806 - 9.801| / 9.801 = 0.051% (符合实验要求 √)
+   备注: 第 3 组视力与体温抽检样本均值 μ = 36.48 ℃, 标准差 σ = 0.18 ℃
+
+【算法复杂度与矩阵特征值随手演算 - Page 2】
+4. 设二阶实对称矩阵 A = [ 4  1 ; 1  4 ]
+   det(A - λI) = (4 - λ)^2 - 1 = λ^2 - 8λ + 15 = (λ - 3)(λ - 5) = 0
+   特征值: λ1 = 5,  λ2 = 3
+   对应正交归一化特征向量: v1 = (1/√2, 1/√2)^T,  v2 = (1/√2, -1/√2)^T
+5. 快速幂递推验证: T(n) = T(n/2) + O(1)  ==>  Time Complexity = O(log n), Space = O(1)
+   测试序列: 36.5, 36.2, 36.8, 36.4, 36.6 -> 平均数 Mean = 36.50, 校验通过!`
+  };
+
+  const BILINGUAL_VOCAB_ROWS = [
+    ['serendipity n.', '意外发现珍宝的运气；机缘巧合', 'A fortunate stroke of serendipity brought them together.'],
+    ['resilience n.', '韧性；恢复力；抗挫能力', 'Mental resilience is essential in scientific research.'],
+    ['ephemeral adj.', '朝生暮死的；短暂瞬息的', 'Fame in the digital world is often ephemeral.'],
+    ['ubiquitous adj.', '无处不在的；普遍存在的', 'Smartphones have become ubiquitous in daily life.'],
+    ['paradigm n.', '范式；典范；思维框架', 'AI has triggered a fundamental paradigm shift.'],
+    ['meticulous adj.', '一丝不苟的；严谨细致的', 'She kept meticulous handwritten laboratory records.'],
+    ['eloquent adj.', '雄辩的；有说服力的；传神的', 'His essay was both eloquent and deeply moving.'],
+    ['pragmatic adj.', '务实的；注重实效的', 'We need a pragmatic approach to solve this bug.'],
+    ['alleviate v.', '减轻；缓和；缓解痛苦', 'Regular exercise helps alleviate academic stress.'],
+    ['corroborate v.', '证实；提供证据支持', 'Experimental data corroborated the theoretical model.'],
+    ['lucid adj.', '清晰易懂的；透彻明晰的', 'The professor gave a lucid explanation of calculus.'],
+    ['tenacious adj.', '坚韧不拔的；顽强持久的', 'Success belongs to those with a tenacious spirit.'],
+    ['ambiguous adj.', '模棱两可的；含糊不清的', 'Avoid ambiguous wording in technical specifications.'],
+    ['catalyst n.', '催化剂；促成变化的契机', 'Curiosity is the best catalyst for innovation.'],
+    ['diligent adj.', '勤勉的；刻苦钻研的', 'Diligent practice improves English handwriting.'],
+    ['empirical adj.', '经验主义的；以实验为依据的', 'Science relies on reproducible empirical evidence.'],
+    ['feasible adj.', '可行的；行得通的', 'This pure-frontend PDF architecture is highly feasible.'],
+    ['intrinsic adj.', '固有的；内在的；本质的', 'Learning has its own intrinsic reward and joy.'],
+    ['nuance n.', '细微差别；微妙之处', 'Handwritten strokes capture every subtle nuance.'],
+    ['scrutinize v.', '仔细检查；细致审阅', 'Always scrutinize boundary conditions in proofs.'],
+    ['synthesize v.', '综合；合成；融会贯通', 'Synthesize multiple sources into a coherent view.'],
+    ['versatile adj.', '多才多艺的；多功能的', 'Canvas 2D is a versatile rendering engine.'],
+    ['authentic adj.', '真实的；逼真的；地道的', 'Multi-glyph sampling creates authentic handwriting.'],
+    ['coherent adj.', '连贯的；条理分明的', 'Write a coherent outline before drafting the essay.'],
+    ['conspicuous adj.', '显著的；引人注目的', 'The red origin crosshair is conspicuous on stage.'],
+    ['culminate v.', '达到顶点；以……告终', 'Months of hard work culminated in a great release.'],
+    ['discrepancy n.', '差异；不符；矛盾之处', 'Check for any discrepancy between measurement sets.'],
+    ['exemplify v.', '作为……的典范；例证', 'These eight templates exemplify diverse use cases.'],
+    ['fluctuate v.', '波动；上下起伏', 'Body temperature fluctuates slightly around 36.5℃.'],
+    ['hypothesis n.', '假说；假设前提', 'Formulate a testable hypothesis before experiments.'],
+    ['imperative adj.', '势在必行的；至关重要的', 'Data privacy is imperative for offline tools.'],
+    ['Ingenious adj.', '巧妙的；独创性的', 'Connected-component BFS is an ingenious slicer.'],
+    ['juxtapose v.', '并列放置；对比对照', 'Juxtapose Chinese and English handwriting styles.'],
+    ['kinematics n.', '运动学；物理运动推导', 'Review kinematics equations on the scratch pad.'],
+    ['luminous adj.', '发光的；清晰生动的', 'A luminous prose style leaves a lasting impression.'],
+    ['mitigate v.', '减缓；降低风险', 'Local caching mitigates network latency completely.'],
+    ['nostalgia n.', '怀旧之情；昔日情怀', 'Paper notebooks evoke a warm sense of nostalgia.'],
+    ['optimistic adj.', '乐观的；充满希望的', 'Stay optimistic and keep refining your craft.'],
+    ['perseverance n.', '毅力；坚持不懈', 'Perseverance turns difficult goals into reality.'],
+    ['quintessential adj.', '最典型的；精髓的', 'Calligraphy is a quintessential traditional art.'],
+    ['rigorous adj.', '严密的；缜密精确的', 'Apply rigorous mathematical derivations on page 2.'],
+    ['spontaneous adj.', '自发的；自然流露的', 'Slightly jittered baselines look spontaneous.'],
+    ['tangible adj.', '切实可感的；有形的', 'Printed PDF sheets provide a tangible result.'],
+    ['unprecedented adj.', '前所未有的；空前的', 'Enjoy unprecedented freedom in per-char dragging.'],
+    ['vivid adj.', '生动的；鲜明逼真的', 'Vivid ink textures make every page come alive.'],
+    ['zealous adj.', '满腔热情的；积极投入的', 'A zealous learner takes notes with great care.']
+  ];
+
   function generateRealisticVisionValue(rng) {
-    // Weighted toward 4.6 - 5.1 just like Screenshot 5 & Screenshot 8
     const pool = [
       '5.0', '5.0', '5.0', '5.0', '5.0', '5.1', '5.1',
       '4.9', '4.9', '4.8', '4.8', '4.7', '4.7',
@@ -324,20 +615,64 @@
   }
 
   function populateManualTable(mode = 'vision') {
+    state.config.manualPreset = mode;
     const rng = mulberry32(state.globalSeed + 999);
-    const maxR = Math.max(state.config.rows, 60);
+    const maxR = Math.max(state.config.rows * 2, 60);
     const maxC = Math.max(state.config.cols, 24);
     const table = [];
+
+    const attendancePool = ['全勤', '正常', '已签到', '全勤', '正常', '准时出勤', '全勤'];
+    const groupPool = ['Group-A1', 'Group-A2', 'Group-B1', 'Group-B2', 'Lab-C1', 'Lab-C2', 'Team-D1', 'Team-D2'];
+    const scorePool = ['96.5', '94.0', '92.5', '91.0', '89.5', '95.0', '88.0', '93.5', '90.0', '97.0'];
+    const gradePool = ['A+', 'A', 'A', 'A-', 'B+', 'A+', 'A', 'B+'];
+    const commentPool = [
+      '操作规范，数据准确',
+      '字迹工整，分析透彻',
+      '实验认真，结论严谨',
+      '推导清晰，完成度高',
+      '步骤完整，图表规范',
+      '独立思考，表现优秀',
+      '误差分析合理，合格',
+      '仪器使用熟练，优良'
+    ];
+    const teacherPool = ['陈默然', '林晓峰', '苏婉清', '顾云深', '周子瑜', '叶知秋'];
+    const statusPool = ['运行正常', '状态良好', '正常', '稳定运行', '正常 √', '良好'];
+    const safetyPool = ['合格 OK', '已核验 √', 'Pass 合格', '安全正常', 'OK 正常'];
+
     for (let r = 0; r < maxR; r++) {
       const row = [];
       for (let c = 1; c <= maxC; c++) {
-        const isShown = state.config.activeCols.includes(c);
-        if (!isShown && mode === 'vision') {
-          row.push(rng() < 0.72 ? '是' : '否');
-        } else if (mode === 'vision') {
-          row.push(generateRealisticVisionValue(rng));
+        if (mode === 'course_eval') {
+          if (c === 1) row.push(attendancePool[Math.floor(rng() * attendancePool.length)]);
+          else if (c === 2) row.push(groupPool[(r + Math.floor(rng() * 3)) % groupPool.length]);
+          else if (c === 3) row.push(scorePool[Math.floor(rng() * scorePool.length)]);
+          else if (c === 4) row.push(gradePool[Math.floor(rng() * gradePool.length)]);
+          else if (c === 5) row.push(commentPool[(r + Math.floor(rng() * 2)) % commentPool.length]);
+          else if (c === 6) row.push(teacherPool[r % teacherPool.length]);
+          else row.push('正常');
+        } else if (mode === 'lab_inspect') {
+          if (c === 1) row.push(`LAB-${String.fromCharCode(65 + (r % 4))}0${(r % 9) + 1}`);
+          else if (c === 2) row.push(`${22 + Math.floor(rng() * 3)}.${Math.floor(1 + rng() * 8)}℃`);
+          else if (c === 3) row.push(`${45 + Math.floor(rng() * 8)}.${Math.floor(rng() * 9)}%`);
+          else if (c === 4) row.push(statusPool[Math.floor(rng() * statusPool.length)]);
+          else if (c === 5) row.push(safetyPool[Math.floor(rng() * safetyPool.length)]);
+          else if (c === 6) row.push(teacherPool[(r + 1) % teacherPool.length]);
+          else row.push('OK');
+        } else if (mode === 'bilingual_notes') {
+          const vItem = BILINGUAL_VOCAB_ROWS[r % BILINGUAL_VOCAB_ROWS.length];
+          if (c === 1) row.push(vItem[0]);
+          else if (c === 2) row.push(vItem[1]);
+          else if (c === 3) row.push(vItem[2]);
+          else row.push('');
         } else {
-          row.push(generateRealisticTempValue(rng));
+          const isShown = state.config.activeCols.includes(c);
+          if (!isShown && mode === 'vision') {
+            row.push(rng() < 0.72 ? '是' : '否');
+          } else if (mode === 'vision') {
+            row.push(generateRealisticVisionValue(rng));
+          } else {
+            row.push(generateRealisticTempValue(rng));
+          }
         }
       }
       table.push(row);
@@ -549,6 +884,8 @@
   }
 
   let editingSlotIndex = -1;
+  const CN_WORDS_PRESET_POOL = ['正常', '良好', '优秀', '合格', '全勤', '已检', '已签', '是', '否', '优', '良', '中'];
+  const EN_LETTERS_PRESET_POOL = ['A+', 'A', 'A-', 'B+', 'B', 'Pass', 'OK', 'Yes', 'Lab', 'Good'];
 
   function renderDigitSlotsUI() {
     const list = document.getElementById('digitSlotsList');
@@ -557,13 +894,13 @@
     state.config.digitSlots.forEach((slot, idx) => {
       const card = document.createElement('div');
       card.className = 'digit-slot-card';
-      card.title = '双击编辑此数位的候选数字';
+      card.title = '点击编辑此槽位的候选数字/汉字/英语字母';
 
       const delBtn = document.createElement('button');
       delBtn.type = 'button';
       delBtn.className = 'slot-del-btn';
       delBtn.textContent = '✕';
-      delBtn.title = '删除此数位';
+      delBtn.title = '删除此槽位';
       delBtn.addEventListener('click', (e) => {
         e.stopPropagation();
         if (state.config.digitSlots.length <= 1) return;
@@ -577,6 +914,12 @@
       nameEl.className = 'slot-name';
       if (slot.type === 'dot') {
         nameEl.textContent = '小数点';
+      } else if (slot.type === 'cn_words') {
+        nameEl.innerHTML = '手写<br>汉字';
+      } else if (slot.type === 'en_letters') {
+        nameEl.innerHTML = '英语<br>字母';
+      } else if (slot.type === 'custom_pool') {
+        nameEl.innerHTML = '自定义<br>字符';
       } else {
         nameEl.innerHTML = '随机<br>数字';
       }
@@ -587,8 +930,8 @@
         subEl.textContent = '( . )';
       } else {
         const d = slot.digits || [];
-        const summary = d.length === 1 ? `[${d[0]}]` : d.length >= 9 ? `[0-9]` : `[${d.slice(0, 3).join(',')}…]`;
-        subEl.textContent = `(双击编辑 ${summary})`;
+        const summary = d.length === 1 ? `[${d[0]}]` : `[${d.slice(0, 2).join(',')}…]`;
+        subEl.textContent = `(点击编辑 ${summary})`;
       }
 
       card.append(delBtn, nameEl, subEl);
@@ -598,32 +941,63 @@
     });
   }
 
+  function populateSlotChecksGrid(type, selectedList) {
+    const digitsWrap = document.getElementById('slotDigitsWrap');
+    const customWrap = document.getElementById('slotCustomPoolWrap');
+    const checksGrid = document.getElementById('slotDigitChecks');
+    const customInput = document.getElementById('slotCustomPoolInput');
+
+    if (type === 'dot') {
+      digitsWrap.hidden = true;
+      if (customWrap) customWrap.hidden = true;
+      return;
+    }
+    if (type === 'custom_pool') {
+      digitsWrap.hidden = true;
+      if (customWrap) {
+        customWrap.hidden = false;
+        if (customInput && selectedList && selectedList.length) {
+          customInput.value = selectedList.join(', ');
+        }
+      }
+      return;
+    }
+
+    digitsWrap.hidden = false;
+    if (customWrap) customWrap.hidden = true;
+    checksGrid.innerHTML = '';
+
+    const pool =
+      type === 'cn_words'
+        ? CN_WORDS_PRESET_POOL
+        : type === 'en_letters'
+        ? EN_LETTERS_PRESET_POOL
+        : [0, 1, 2, 3, 4, 5, 6, 7, 8, 9];
+
+    const selStrs = (selectedList || []).map(String);
+    for (const item of pool) {
+      const lbl = document.createElement('label');
+      lbl.className = 'digit-check-label';
+      const chk = document.createElement('input');
+      chk.type = 'checkbox';
+      chk.value = String(item);
+      chk.checked = selStrs.includes(String(item));
+      const sp = document.createElement('span');
+      sp.textContent = String(item);
+      lbl.append(chk, sp);
+      checksGrid.appendChild(lbl);
+    }
+  }
+
   function openEditSlotModal(idx) {
     editingSlotIndex = idx;
     const slot = state.config.digitSlots[idx];
     if (!slot) return;
     const dialog = document.getElementById('dialogEditSlot');
     const typeSelect = document.getElementById('slotTypeSelect');
-    const digitsWrap = document.getElementById('slotDigitsWrap');
-    const checksGrid = document.getElementById('slotDigitChecks');
 
-    typeSelect.value = slot.type;
-    digitsWrap.hidden = slot.type === 'dot';
-
-    checksGrid.innerHTML = '';
-    for (let d = 0; d <= 9; d++) {
-      const lbl = document.createElement('label');
-      lbl.className = 'digit-check-label';
-      const chk = document.createElement('input');
-      chk.type = 'checkbox';
-      chk.value = String(d);
-      chk.checked = (slot.digits || []).includes(d);
-      const sp = document.createElement('span');
-      sp.textContent = String(d);
-      lbl.append(chk, sp);
-      checksGrid.appendChild(lbl);
-    }
-
+    typeSelect.value = slot.type || 'digit';
+    populateSlotChecksGrid(typeSelect.value, slot.digits || []);
     dialog.showModal();
   }
 
@@ -650,11 +1024,33 @@
     renderColsCheckGrid();
     renderDigitSlotsUI();
 
-    const isManual = state.config.fillMode === 'manual';
-    document.getElementById('tabFillRandom').classList.toggle('active', !isManual);
-    document.getElementById('tabFillManual').classList.toggle('active', isManual);
-    document.getElementById('panelFillRandom').hidden = isManual;
-    document.getElementById('panelFillManual').hidden = !isManual;
+    const mode = state.config.fillMode || 'random';
+    const tabRandom = document.getElementById('tabFillRandom');
+    const tabManual = document.getElementById('tabFillManual');
+    const tabArticle = document.getElementById('tabFillArticle');
+    if (tabRandom) tabRandom.classList.toggle('active', mode === 'random');
+    if (tabManual) tabManual.classList.toggle('active', mode === 'manual');
+    if (tabArticle) tabArticle.classList.toggle('active', mode === 'article');
+
+    const pRandom = document.getElementById('panelFillRandom');
+    const pManual = document.getElementById('panelFillManual');
+    const pArticle = document.getElementById('panelFillArticle');
+    if (pRandom) pRandom.hidden = mode !== 'random';
+    if (pManual) pManual.hidden = mode !== 'manual';
+    if (pArticle) pArticle.hidden = mode !== 'article';
+
+    const layoutSel = document.getElementById('articleLayoutSelect');
+    if (layoutSel && state.config.articleLayout) {
+      layoutSel.value = state.config.articleLayout;
+    }
+    const artTxt = document.getElementById('articleTextarea');
+    if (artTxt && state.config.articleText !== undefined && document.activeElement !== artTxt) {
+      artTxt.value = state.config.articleText;
+    }
+    const inkSel = document.getElementById('inkColorSelect');
+    if (inkSel) {
+      inkSel.value = state.config.inkColor || '#161616';
+    }
 
     for (const [secKey, map] of Object.entries(dualSliderUpdaters)) {
       for (const fn of Object.values(map)) fn();
@@ -662,11 +1058,14 @@
   }
 
   // =========================================================================
-  // Core Handwriting Canvas Renderer (Ultra-Realistic Multi-Glyph Engine)
+  // Core Handwriting Canvas Renderer (Digits + Chinese Characters + English Letters)
   // =========================================================================
   function getCellText(pageNum, rowIdx, colIdx1Based, rng) {
     if (state.config.fillMode === 'manual') {
-      const rowArr = state.config.manualData[rowIdx];
+      const globalRowIdx = (pageNum - 1) * state.config.rows + rowIdx;
+      const rowArr =
+        (state.config.manualData && state.config.manualData[globalRowIdx]) ||
+        (state.config.manualData && state.config.manualData[rowIdx]);
       if (rowArr && rowArr[colIdx1Based - 1] !== undefined) {
         return String(rowArr[colIdx1Based - 1]).trim();
       }
@@ -675,7 +1074,6 @@
     if (state.config.visionPreset) {
       return generateRealisticVisionValue(rng);
     }
-    // Build from digitSlots
     let out = '';
     for (const slot of state.config.digitSlots) {
       if (slot.type === 'dot') {
@@ -687,6 +1085,110 @@
       }
     }
     return out;
+  }
+
+  // Layout helper for 20x20 Chinese Composition Grid Paper ('grid' mode)
+  function layoutArticleIntoGrid(text, rowsPerPage, colsPerRow) {
+    const pagesGrid = [];
+    let curPage = Array.from({ length: rowsPerPage }, () => Array(colsPerRow).fill(''));
+    let r = 0;
+    let c = 0;
+
+    const pushNewPage = () => {
+      pagesGrid.push(curPage);
+      curPage = Array.from({ length: rowsPerPage }, () => Array(colsPerRow).fill(''));
+      r = 0;
+      c = 0;
+    };
+
+    const advanceCell = () => {
+      c++;
+      if (c >= colsPerRow) {
+        c = 0;
+        r++;
+        if (r >= rowsPerPage) {
+          pushNewPage();
+        }
+      }
+    };
+
+    const rawLines = String(text || '').replace(/\r\n/g, '\n').split('\n');
+    const closingPunct = /^[，。！？；：、”’）》〉,.!?;:\])]/;
+
+    for (let li = 0; li < rawLines.length; li++) {
+      const line = rawLines[li];
+      const chars = Array.from(line);
+      for (let i = 0; i < chars.length; i++) {
+        const ch = chars[i];
+        if (ch === '　') {
+          // Full-width space leaves 1 grid square empty
+          curPage[r][c] = '';
+          advanceCell();
+          continue;
+        }
+        if (ch === ' ' || ch === '\t') {
+          continue;
+        }
+        // Avoid starting a new line with closing punctuation (attach to previous cell)
+        if (c === 0 && i > 0 && closingPunct.test(ch)) {
+          if (r > 0) {
+            curPage[r - 1][colsPerRow - 1] += ch;
+            continue;
+          } else if (pagesGrid.length > 0) {
+            pagesGrid[pagesGrid.length - 1][rowsPerPage - 1][colsPerRow - 1] += ch;
+            continue;
+          }
+        }
+        curPage[r][c] = ch;
+        advanceCell();
+      }
+      // Paragraph break: move to start of next row
+      if (li < rawLines.length - 1 && c > 0) {
+        c = 0;
+        r++;
+        if (r >= rowsPerPage) {
+          pushNewPage();
+        }
+      }
+    }
+    pagesGrid.push(curPage);
+    return pagesGrid;
+  }
+
+  // Layout helper for English Lined Paper & Blank Scratch Paper ('lines' mode)
+  function layoutArticleIntoLines(text, maxLineWidthPx, rowHeightPx) {
+    const rawParas = String(text || '').replace(/\r\n/g, '\n').split('\n');
+    const approxCharW = rowHeightPx * 0.35;
+    const maxUnitsPerLine = Math.max(16, Math.floor((maxLineWidthPx - 18) / approxCharW));
+    const wrappedLines = [];
+
+    for (const para of rawParas) {
+      if (!para.trim()) {
+        wrappedLines.push('');
+        continue;
+      }
+      // Tokenize into words (keeping spaces) or single CJK chars so English words never split mid-word
+      const tokens = para.match(/[\u3000-\u9fff\uff00-\uffef]|[^\s\u3000-\u9fff\uff00-\uffef]+|\s+/g) || [];
+      let curLine = '';
+      let curUnits = 0;
+
+      for (const tok of tokens) {
+        const isCJK = /[\u3000-\u9fff\uff00-\uffef]/.test(tok);
+        const tokUnits = isCJK ? tok.length * 1.65 : tok.length * 0.92;
+        if (curUnits + tokUnits > maxUnitsPerLine && curLine.trim().length > 0) {
+          wrappedLines.push(curLine.replace(/\s+$/, ''));
+          curLine = tok.replace(/^\s+/, '');
+          curUnits = isCJK ? curLine.length * 1.65 : curLine.length * 0.92;
+        } else {
+          curLine += tok;
+          curUnits += tokUnits;
+        }
+      }
+      if (curLine.length > 0) {
+        wrappedLines.push(curLine);
+      }
+    }
+    return wrappedLines;
   }
 
   function drawHandwrittenString(ctx, text, cellCenterX, cellCenterY, colWidthPx, rowHeightPx, rng, allowScratch, hitCtx) {
@@ -710,17 +1212,15 @@
     ctx.scale(cellScale, cellScale);
 
     // Check if this cell triggers a realistic human scratch-out & rewrite (~1.4% probability when enabled)
-    const doScratch = allowScratch && state.scratchEffect && rng() < 0.014 && text.length >= 3;
+    const doScratch = allowScratch && state.scratchEffect && rng() < 0.014 && text.length >= 2;
     if (doScratch) {
-      // Shift slightly left, draw a mistaken value, strike it out with 2 pen slashes, then draw real value on right
       ctx.save();
       ctx.translate(-colWidthPx * 0.22, 0);
       ctx.scale(0.84, 0.84);
       const wrongLast = String(Math.floor(1 + rng() * 9));
       const wrongText = text.slice(0, -1) + wrongLast;
       drawCharactersSequence(ctx, font, wrongText, rowHeightPx, rng, null);
-      // Draw realistic pen scratch lines over the mistake
-      ctx.strokeStyle = 'rgba(22, 22, 22, 0.88)';
+      ctx.strokeStyle = cfg.inkColor || 'rgba(22, 22, 22, 0.88)';
       ctx.lineWidth = 1.9;
       ctx.lineCap = 'round';
       for (let s = 0; s < 3; s++) {
@@ -740,30 +1240,54 @@
       text,
       rowHeightPx,
       rng,
-      hitCtx ? { ...hitCtx, originX, originY, cellScale } : null
+      hitCtx ? { ...hitCtx, originX, originY, cellScale, maxWidth: (hitCtx.maxWidth || colWidthPx * 0.94) / cellScale } : null
     );
     ctx.restore();
   }
 
   function drawCharactersSequence(ctx, font, text, rowHeightPx, rng, hitCtx) {
     const cfg = state.config;
+    const inkColor = cfg.inkColor || '#161616';
     const chars = Array.from(text);
-    const baseDigitHeight = rowHeightPx * 0.56;
+    const isGridEssay = cfg.fillMode === 'article' && cfg.articleLayout === 'grid';
+    const isLinesEssay = cfg.fillMode === 'article' && cfg.articleLayout === 'lines';
+    const baseDigitHeight = isGridEssay
+      ? Math.min(rowHeightPx * 0.44, cfg.colWidth * PX_PER_CM * 0.62)
+      : isLinesEssay
+      ? rowHeightPx * 0.47
+      : rowHeightPx * 0.56;
     const naturalScale = baseDigitHeight / 26.0;
 
-    // Pre-pick glyphs and compute total width so we can center around cell origin + cellPad
     const pickedItems = [];
     let totalAdvance = 0;
 
     for (let i = 0; i < chars.length; i++) {
       const ch = chars[i];
-      const variants = font.glyphs[ch];
+      if (ch === ' ' || ch === '\t' || ch === '　') {
+        const spAdv = ch === '　' ? baseDigitHeight * 0.95 : baseDigitHeight * 0.42;
+        pickedItems.push({
+          charIdx: i,
+          ch,
+          isSpace: true,
+          advance: spAdv
+        });
+        totalAdvance += spAdv;
+        continue;
+      }
+
+      const variants = getGlyphVariantsForChar(font, ch, inkColor);
       if (!variants || variants.length === 0) continue;
       const g = variants[Math.floor(rng() * variants.length)];
 
-      const isDot = ch === '.';
+      const isSynth = Boolean(g.isSynthesized);
+      const isDot = !isSynth && ch === '.';
       let normScale = naturalScale;
-      if (state.normalizeFontSize) {
+
+      if (isSynth) {
+        // Synthesized glyphs all share a unified 56px vertical em-frame
+        const targetEmH = g.isCJK ? baseDigitHeight * 1.18 : baseDigitHeight * 1.12;
+        normScale = targetEmH / 46.0;
+      } else if (state.normalizeFontSize) {
         if (isDot) {
           normScale = (baseDigitHeight * 0.22) / Math.max(6, g.h);
         } else {
@@ -784,12 +1308,20 @@
       const drawH = g.h * finalScaleY;
 
       const kerning = isDot ? 0 : randRange(rng, cfg.charPosRandom.spacing) * 0.45;
-      const advance = (isDot ? Math.max(5.5, drawW * 0.85) : drawW * 0.88 + 1.2) + kerning;
+      const baseAdv = isSynth
+        ? g.isCJK
+          ? drawW * 0.94 + 1.0
+          : drawW * 0.90 + 0.8
+        : isDot
+        ? Math.max(5.5, drawW * 0.85)
+        : drawW * 0.88 + 1.2;
+      const advance = Math.max(4, baseAdv + kerning);
 
       pickedItems.push({
         charIdx: i,
         ch,
         isDot,
+        isSynth,
         g,
         drawW,
         drawH,
@@ -803,10 +1335,35 @@
       totalAdvance += advance;
     }
 
-    let cursorX = -totalAdvance / 2 + cfg.cellPad * PX_PER_CM * 0.5;
+    const alignLeft = hitCtx && hitCtx.alignLeft;
+
+    // Auto-fit: shrink the whole string uniformly when it would overflow its cell / line width
+    const maxWidthPx = hitCtx && hitCtx.maxWidth ? hitCtx.maxWidth : 0;
+    if (maxWidthPx > 0 && totalAdvance > maxWidthPx) {
+      const fit = Math.max(0.35, maxWidthPx / totalAdvance);
+      for (const it of pickedItems) {
+        it.advance *= fit;
+        if (!it.isSpace) {
+          it.drawW *= fit;
+          it.drawH *= fit;
+          it.dx *= fit;
+          it.dy *= fit;
+        }
+      }
+      totalAdvance *= fit;
+    }
+
+    let cursorX = alignLeft
+      ? cfg.cellPad * PX_PER_CM * 0.5
+      : -totalAdvance / 2 + cfg.cellPad * PX_PER_CM * 0.5;
     let cellMinX = Infinity, cellMinY = Infinity, cellMaxX = -Infinity, cellMaxY = -Infinity;
 
     for (const item of pickedItems) {
+      if (item.isSpace) {
+        cursorX += item.advance;
+        continue;
+      }
+
       ctx.save();
       const charKey = hitCtx ? `${hitCtx.page}-${hitCtx.r}-${hitCtx.c}-${item.charIdx}` : null;
       const userCharOff = (charKey && cfg.charOffsets && cfg.charOffsets[charKey]) || { dx: 0, dy: 0 };
@@ -895,7 +1452,7 @@
       ctx.fillRect(0, 0, pageObj.width, pageObj.height);
     }
 
-    // 2. Draw handwritten numbers in each active cell
+    // 2. Draw handwritten content (Table Cells OR Grid Essay OR Flowing Lined/Scratch Paper)
     const pg = getPageGridParams(pageIndex1Based);
     const startXPx = pg.startX * PX_PER_CM;
     const startYPx = pg.startY * PX_PER_CM;
@@ -907,6 +1464,20 @@
     const collectHits = seedOffset === 0 && pageIndex1Based === state.currentPage;
     if (collectHits) {
       state.hitBoxes = { chars: [], cells: [], rows: [] };
+    }
+
+    const isArticle = state.config.fillMode === 'article';
+    const articleLayout = state.config.articleLayout || 'grid';
+    let gridPagesData = null;
+    let wrappedLinesData = null;
+
+    if (isArticle) {
+      const rawText = state.config.articleText || SAMPLE_ARTICLES.cn_essay;
+      if (articleLayout === 'lines') {
+        wrappedLinesData = layoutArticleIntoLines(rawText, cols * colWidthPx, rowHeightPx);
+      } else {
+        gridPagesData = layoutArticleIntoGrid(rawText, rows, cols);
+      }
     }
 
     for (let r = 0; r < rows; r++) {
@@ -927,6 +1498,37 @@
         });
       }
 
+      // Flowing lined/scratch paper mode: 1 full-width line per row, left-aligned from startXPx
+      if (isArticle && articleLayout === 'lines') {
+        const globalLineIdx = (pageIndex1Based - 1) * rows + r;
+        const lineText = wrappedLinesData && wrappedLinesData[globalLineIdx];
+        if (!lineText) continue;
+
+        const customColOffsetCm = (state.config.colOffsets && state.config.colOffsets['1']) || 0;
+        const cellKey = `${pageIndex1Based}-${r}-1`;
+        const cellOff = (state.config.cellOffsets && state.config.cellOffsets[cellKey]) || { dx: 0, dy: 0 };
+        const lineStartX = startXPx + customColOffsetCm * PX_PER_CM + rowOff.dx + cellOff.dx;
+        const lineCenterY = baseCellCenterY + cellOff.dy;
+
+        const lineSeed =
+          state.globalSeed +
+          seedOffset * 100003 +
+          pageIndex1Based * 10007 +
+          r * 313 +
+          37;
+        const rng = mulberry32(lineSeed);
+        drawHandwrittenString(ctx, lineText, lineStartX, lineCenterY, cols * colWidthPx, rowHeightPx, rng, false, {
+          collect: collectHits,
+          alignLeft: true,
+          maxWidth: cols * colWidthPx * 0.97,
+          page: pageIndex1Based,
+          r,
+          c: 1
+        });
+        continue;
+      }
+
+      // Standard Table Cell mode OR Chinese 20x20 Grid Essay mode
       for (let c = 1; c <= cols; c++) {
         if (!state.config.activeCols.includes(c)) continue;
         const customColOffsetCm = (state.config.colOffsets && state.config.colOffsets[String(c)]) || 0;
@@ -944,9 +1546,20 @@
           r * 313 +
           c * 37;
         const rng = mulberry32(cellSeed);
-        const text = getCellText(pageIndex1Based, r, c, rng);
-        drawHandwrittenString(ctx, text, cellCenterX, cellCenterY, colWidthPx, rowHeightPx, rng, true, {
+
+        let text = '';
+        if (isArticle && gridPagesData) {
+          const pageGrid = gridPagesData[pageIndex1Based - 1];
+          text = (pageGrid && pageGrid[r] && pageGrid[r][c - 1]) || '';
+        } else {
+          text = getCellText(pageIndex1Based, r, c, rng);
+        }
+        if (!text) continue;
+
+        const customMaxCm = state.config.colMaxWidths && state.config.colMaxWidths[String(c)];
+        drawHandwrittenString(ctx, text, cellCenterX, cellCenterY, colWidthPx, rowHeightPx, rng, !isArticle, {
           collect: collectHits,
+          maxWidth: customMaxCm ? customMaxCm * PX_PER_CM * 0.95 : colWidthPx * 0.94,
           page: pageIndex1Based,
           r,
           c
@@ -1133,9 +1746,9 @@
     const pageObj = state.pages[state.currentPage - 1];
     if (!viewport || !pageObj) return;
     const isLandscape = pageObj.width > pageObj.height;
-    state.zoom = isLandscape ? 118 : 128;
-    state.panX = -32;
-    state.panY = -42;
+    state.zoom = isLandscape ? 84 : 96;
+    state.panX = 16;
+    state.panY = 12;
     updateStageTransform();
   }
 
@@ -1166,16 +1779,20 @@
     state.currentPage = 1;
     state.projectPath = ex.path;
     state.config = deepClone(ex.config);
-    state.config.colOffsets = {};
+    state.config.colOffsets = ex.config.colOffsets ? deepClone(ex.config.colOffsets) : {};
     state.config.rowOffsets = {};
     state.config.cellOffsets = {};
     state.config.charOffsets = {};
+    if (!state.config.inkColor) state.config.inkColor = '#161616';
 
     if (ex.config.fillMode === 'manual') {
-      populateManualTable('vision');
+      populateManualTable(ex.config.manualPreset || (ex.config.visionPreset ? 'vision' : 'temp'));
     } else {
       populateManualTable('temp');
     }
+
+    const quickSel = document.getElementById('quickExampleSelect');
+    if (quickSel) quickSel.value = exampleKey;
 
     showWorkspaceView();
     refreshPageNavUI();
@@ -1267,7 +1884,7 @@
     document.getElementById('workspaceView').hidden = true;
     document.getElementById('fontMakerView').hidden = true;
     document.getElementById('windowTitlebar').classList.remove('dark');
-    document.getElementById('windowTitleText').textContent = '手写数字生成器';
+    document.getElementById('windowTitleText').textContent = '手写体生成器 (汉字 · 英语 · 数字)';
     document.getElementById('tabMainApp').classList.add('active');
     document.getElementById('tabFontMaker').classList.remove('active');
   }
@@ -1277,7 +1894,7 @@
     document.getElementById('workspaceView').hidden = false;
     document.getElementById('fontMakerView').hidden = true;
     document.getElementById('windowTitlebar').classList.remove('dark');
-    document.getElementById('windowTitleText').textContent = '手写数字生成器';
+    document.getElementById('windowTitleText').textContent = '手写体生成器 (汉字 · 英语 · 数字)';
     document.getElementById('tabMainApp').classList.add('active');
     document.getElementById('tabFontMaker').classList.remove('active');
   }
@@ -1948,7 +2565,7 @@
       name: `自制手写字体 #${fontsRegistry.length}`,
       glyphs
     };
-    await loadFontFromData(fontObj);
+    await loadFontFromData(fontObj, true);
     renderCurrentPage();
     showNoticeDialog('导出字体', `生成成功，共保存 ${totalSaved} 个字形`);
   }
@@ -1966,9 +2583,13 @@
     document.getElementById('btnHomeOpenFontMaker').addEventListener('click', () => showFontMakerView());
     document.getElementById('btnGoMakeFont').addEventListener('click', () => showFontMakerView());
 
-    // Home Example Cards & Buttons
-    document.getElementById('btnExample1').addEventListener('click', () => loadExample('example1'));
-    document.getElementById('btnExample2').addEventListener('click', () => loadExample('example2'));
+    // Quick Example Switcher in Top Toolbar
+    const quickExampleSelect = document.getElementById('quickExampleSelect');
+    if (quickExampleSelect) {
+      quickExampleSelect.addEventListener('change', (e) => {
+        if (e.target.value) loadExample(e.target.value);
+      });
+    }
 
     const fileInputPdf = document.getElementById('fileInputPdf');
     document.getElementById('btnHomeSelectPdf').addEventListener('click', () => fileInputPdf.click());
@@ -2006,7 +2627,7 @@
       });
       const a = document.createElement('a');
       a.href = URL.createObjectURL(blob);
-      a.download = '手写数字项目配置.json';
+      a.download = '手写体项目配置.json';
       a.click();
     });
 
@@ -2057,7 +2678,7 @@
     document.getElementById('btnRerollSeed').addEventListener('click', () => {
       state.globalSeed = Math.floor(Math.random() * 90000000) + 100000;
       if (state.config.fillMode === 'manual') {
-        populateManualTable(state.config.visionPreset ? 'vision' : 'temp');
+        populateManualTable(state.config.manualPreset || (state.config.visionPreset ? 'vision' : 'temp'));
       }
       renderCurrentPage();
     });
@@ -2124,7 +2745,7 @@
       });
     });
 
-    // Fill Mode Tabs & Presets
+    // Fill Mode Tabs & Presets ('random' | 'manual' | 'article')
     document.getElementById('tabFillRandom').addEventListener('click', () => {
       state.config.fillMode = 'random';
       syncAllControlsFromState();
@@ -2132,10 +2753,26 @@
     });
     document.getElementById('tabFillManual').addEventListener('click', () => {
       state.config.fillMode = 'manual';
+      if (!state.config.manualData || !state.config.manualData.length) {
+        populateManualTable(state.config.manualPreset || 'course_eval');
+      }
       syncAllControlsFromState();
       renderCurrentPage();
-      openManualInputModal();
     });
+    const tabFillArticle = document.getElementById('tabFillArticle');
+    if (tabFillArticle) {
+      tabFillArticle.addEventListener('click', () => {
+        state.config.fillMode = 'article';
+        if (!state.config.articleText) {
+          state.config.articleText = SAMPLE_ARTICLES.cn_essay;
+        }
+        if (!state.config.articleLayout) {
+          state.config.articleLayout = state.config.cols >= 12 ? 'grid' : 'lines';
+        }
+        syncAllControlsFromState();
+        renderCurrentPage();
+      });
+    }
 
     document.getElementById('btnPresetTemp').addEventListener('click', () => {
       state.config.visionPreset = false;
@@ -2164,6 +2801,34 @@
       renderCurrentPage();
     });
 
+    const btnPresetCnStatus = document.getElementById('btnPresetCnStatus');
+    if (btnPresetCnStatus) {
+      btnPresetCnStatus.addEventListener('click', () => {
+        state.config.visionPreset = false;
+        state.config.fillMode = 'random';
+        state.config.digitSlots = [
+          { type: 'cn_words', digits: ['正常', '良好', '合格', '优秀', '全勤', '已检'] }
+        ];
+        syncAllControlsFromState();
+        pushHistory();
+        renderCurrentPage();
+      });
+    }
+
+    const btnPresetEnGrade = document.getElementById('btnPresetEnGrade');
+    if (btnPresetEnGrade) {
+      btnPresetEnGrade.addEventListener('click', () => {
+        state.config.visionPreset = false;
+        state.config.fillMode = 'random';
+        state.config.digitSlots = [
+          { type: 'en_letters', digits: ['A+', 'A', 'A-', 'B+', 'B', 'Pass'] }
+        ];
+        syncAllControlsFromState();
+        pushHistory();
+        renderCurrentPage();
+      });
+    }
+
     document.getElementById('btnAddDigitSlot').addEventListener('click', () => {
       state.config.visionPreset = false;
       state.config.digitSlots.push({ type: 'digit', digits: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9] });
@@ -2172,9 +2837,50 @@
       renderCurrentPage();
     });
 
+    // Article / Essay / Scratch Paper Controls
+    const articleLayoutSelect = document.getElementById('articleLayoutSelect');
+    if (articleLayoutSelect) {
+      articleLayoutSelect.addEventListener('change', (e) => {
+        state.config.articleLayout = e.target.value;
+        pushHistory();
+        renderCurrentPage();
+      });
+    }
+    const articleTextarea = document.getElementById('articleTextarea');
+    if (articleTextarea) {
+      articleTextarea.addEventListener('input', (e) => {
+        state.config.articleText = e.target.value;
+        renderCurrentPage();
+      });
+      articleTextarea.addEventListener('change', () => pushHistory());
+    }
+    const bindSampleArticleBtn = (btnId, sampleKey, layoutMode) => {
+      const btn = document.getElementById(btnId);
+      if (!btn) return;
+      btn.addEventListener('click', () => {
+        state.config.fillMode = 'article';
+        state.config.articleText = SAMPLE_ARTICLES[sampleKey];
+        if (layoutMode) state.config.articleLayout = layoutMode;
+        syncAllControlsFromState();
+        pushHistory();
+        renderCurrentPage();
+      });
+    };
+    bindSampleArticleBtn('btnSampleCnEssay', 'cn_essay', 'grid');
+    bindSampleArticleBtn('btnSampleEnEssay', 'en_essay', 'lines');
+    bindSampleArticleBtn('btnSampleScratch', 'scratch_math', 'lines');
+
     // Edit Slot Modal
     document.getElementById('slotTypeSelect').addEventListener('change', (e) => {
-      document.getElementById('slotDigitsWrap').hidden = e.target.value === 'dot';
+      const t = e.target.value;
+      const curSlot = state.config.digitSlots[editingSlotIndex];
+      const defPool =
+        t === 'cn_words'
+          ? ['正常', '良好', '优秀', '合格']
+          : t === 'en_letters'
+          ? ['A+', 'A', 'A-', 'B+']
+          : [0, 1, 2, 3, 4, 5, 6, 7, 8, 9];
+      populateSlotChecksGrid(t, curSlot && curSlot.type === t ? curSlot.digits : defPool);
     });
     document.getElementById('btnSlotSelectAll').addEventListener('click', () => {
       document.querySelectorAll('#slotDigitChecks input[type="checkbox"]').forEach((c) => (c.checked = true));
@@ -2190,12 +2896,19 @@
         state.config.visionPreset = false;
         if (t === 'dot') {
           slot.digits = ['.'];
+        } else if (t === 'custom_pool') {
+          const raw = document.getElementById('slotCustomPoolInput').value || '正常';
+          const tokens = raw
+            .split(/[,，\s]+/)
+            .map((s) => s.trim())
+            .filter(Boolean);
+          slot.digits = tokens.length ? tokens : ['正常'];
         } else {
           const checked = [];
           document.querySelectorAll('#slotDigitChecks input[type="checkbox"]:checked').forEach((c) => {
-            checked.push(Number(c.value));
+            checked.push(t === 'digit' ? Number(c.value) : c.value);
           });
-          slot.digits = checked.length ? checked : [0];
+          slot.digits = checked.length ? checked : t === 'digit' ? [0] : ['正常'];
         }
         renderDigitSlotsUI();
         pushHistory();
@@ -2210,35 +2923,46 @@
     document.getElementById('btnOpenManualModal').addEventListener('click', openManualInputModal);
     document.getElementById('btnCloseManualModal').addEventListener('click', () => document.getElementById('dialogManualInput').close());
     document.getElementById('btnSaveManualModal').addEventListener('click', saveManualModalChanges);
-    document.getElementById('btnModalFillVision').addEventListener('click', () => {
-      state.globalSeed += 17;
-      populateManualTable('vision');
-      openManualInputModal();
-      renderCurrentPage();
-    });
-    document.getElementById('btnModalFillTemp').addEventListener('click', () => {
-      state.globalSeed += 17;
-      populateManualTable('temp');
-      openManualInputModal();
-      renderCurrentPage();
-    });
-    document.getElementById('btnRegenManualVision').addEventListener('click', () => {
-      state.globalSeed += 19;
-      populateManualTable('vision');
-      renderCurrentPage();
-    });
-    document.getElementById('btnRegenManualTemp').addEventListener('click', () => {
-      state.globalSeed += 19;
-      populateManualTable('temp');
-      renderCurrentPage();
-    });
 
-    // Font Select & Checkboxes
+    const bindManualPresetButtons = (modalBtnId, sideBtnId, presetName) => {
+      const mBtn = document.getElementById(modalBtnId);
+      if (mBtn) {
+        mBtn.addEventListener('click', () => {
+          state.globalSeed += 17;
+          populateManualTable(presetName);
+          openManualInputModal();
+          renderCurrentPage();
+        });
+      }
+      const sBtn = document.getElementById(sideBtnId);
+      if (sBtn) {
+        sBtn.addEventListener('click', () => {
+          state.globalSeed += 19;
+          populateManualTable(presetName);
+          renderCurrentPage();
+        });
+      }
+    };
+    bindManualPresetButtons('btnModalFillVision', 'btnRegenManualVision', 'vision');
+    bindManualPresetButtons('btnModalFillTemp', 'btnRegenManualTemp', 'temp');
+    bindManualPresetButtons('btnModalFillCourse', 'btnRegenManualCourse', 'course_eval');
+    bindManualPresetButtons('btnModalFillLab', 'btnRegenManualLab', 'lab_inspect');
+    bindManualPresetButtons('btnModalFillBilingual', 'btnRegenManualBilingual', 'bilingual_notes');
+
+    // Font Select, Ink Color Select & Checkboxes
     document.getElementById('fontSelect').addEventListener('change', (e) => {
       activeFontIndex = Number(e.target.value) || 0;
       refreshFontSelectUI();
       renderCurrentPage();
     });
+    const inkColorSelect = document.getElementById('inkColorSelect');
+    if (inkColorSelect) {
+      inkColorSelect.addEventListener('change', (e) => {
+        state.config.inkColor = e.target.value || '#161616';
+        pushHistory();
+        renderCurrentPage();
+      });
+    }
     document.getElementById('chkNormalizeFontSize').addEventListener('change', (e) => {
       state.normalizeFontSize = e.target.checked;
       renderCurrentPage();
@@ -2807,18 +3531,54 @@
   // =========================================================================
   // Boot Application
   // =========================================================================
+  function buildHomeExampleCards() {
+    const grid = document.getElementById('examplesShowcaseGrid');
+    if (!grid || !window.HANDWRITE_EXAMPLES) return;
+    grid.innerHTML = '';
+
+    const keys = Object.keys(window.HANDWRITE_EXAMPLES);
+    keys.forEach((key) => {
+      const ex = window.HANDWRITE_EXAMPLES[key];
+      if (!ex || !ex.pages || !ex.pages[0]) return;
+
+      const card = document.createElement('button');
+      card.type = 'button';
+      card.className = 'example-card';
+      card.id = `btn_${key}`;
+      card.title = `点击加载：${ex.title || ex.name}`;
+
+      const thumbWrap = document.createElement('div');
+      thumbWrap.className = 'example-card-thumb';
+
+      const img = document.createElement('img');
+      img.src = ex.pages[0].src;
+      img.alt = ex.title || ex.name;
+
+      const badge = document.createElement('span');
+      badge.className = 'example-badge';
+      badge.textContent = ex.badge || key;
+
+      thumbWrap.append(img, badge);
+
+      const titleEl = document.createElement('div');
+      titleEl.className = 'example-card-title';
+      titleEl.textContent = ex.title || ex.name;
+
+      const descEl = document.createElement('div');
+      descEl.className = 'example-card-desc';
+      descEl.textContent = ex.desc || `${ex.pages.length}页 PDF 范例`;
+
+      card.append(thumbWrap, titleEl, descEl);
+      card.addEventListener('click', () => loadExample(key));
+      grid.appendChild(card);
+    });
+  }
+
   async function init() {
     initAllNativeSliders();
     buildDualSliderSections();
     bindEvents();
-
-    // Populate Home Example Preview Cards & Font Maker Welcome Photo
-    if (window.HANDWRITE_EXAMPLES) {
-      const ex1 = window.HANDWRITE_EXAMPLES.example1;
-      const ex2 = window.HANDWRITE_EXAMPLES.example2;
-      if (ex1 && ex1.pages[0]) document.getElementById('imgExample1Preview').src = ex1.pages[0].src;
-      if (ex2 && ex2.pages[0]) document.getElementById('imgExample2Preview').src = ex2.pages[0].src;
-    }
+    buildHomeExampleCards();
 
     if (window.DEFAULT_HANDWRITE_DATA) {
       document.getElementById('fmSamplePhotoImg').src = window.DEFAULT_HANDWRITE_DATA.sampleSheet;
@@ -2830,18 +3590,29 @@
     // Optional URL parameter for quick preview / automated verification
     const params = new URLSearchParams(window.location.search);
     const demo = params.get('demo');
-    if (demo === 'example1') {
-      await loadExample('example1');
+    if (demo && window.HANDWRITE_EXAMPLES && window.HANDWRITE_EXAMPLES[demo]) {
+      await loadExample(demo);
+      if (params.get('style')) {
+        activeFontIndex = Math.min(fontsRegistry.length - 1, Math.max(0, Number(params.get('style'))));
+        refreshFontSelectUI();
+      }
+      if (params.get('ink')) {
+        state.config.inkColor = params.get('ink');
+        syncAllControlsFromState();
+      }
+      if (params.get('page')) {
+        state.currentPage = Math.max(1, Math.min(state.pages.length, Number(params.get('page'))));
+        refreshPageNavUI();
+      }
       if (params.get('zoom')) {
         state.zoom = Number(params.get('zoom'));
         state.panX = Number(params.get('panX') || -60);
         state.panY = Number(params.get('panY') || -20);
         updateStageTransform();
       }
-    } else if (demo === 'example2') {
-      await loadExample('example2');
+      renderCurrentPage();
     } else if (demo === 'manual') {
-      await loadExample('example2');
+      await loadExample('example3');
       openManualInputModal();
     } else if (demo && demo.startsWith('fontmaker')) {
       showFontMakerView();

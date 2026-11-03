@@ -3,8 +3,8 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>手写数字生成器</title>
-  <link rel="stylesheet" href="styles.css?v=10">
+  <title>手写体生成器 · 汉字 / 英语字母 / 数字填表与稿纸生成工具</title>
+  <link rel="stylesheet" href="styles.css?v=11">
 </head>
 <body>
   <div class="app-shell">
@@ -12,29 +12,22 @@
     <header class="window-titlebar" id="windowTitlebar">
       <div class="titlebar-brand">
         <span class="titlebar-icon">✎</span>
-        <span id="windowTitleText">手写数字生成器</span>
+        <span id="windowTitleText">手写体生成器 (汉字 · 英语 · 数字)</span>
       </div>
       <div class="titlebar-mode-switch">
-        <button type="button" class="mode-pill active" id="tabMainApp">📄 手写数字填表生成器</button>
+        <button type="button" class="mode-pill active" id="tabMainApp">📄 手写填表与稿纸生成器</button>
         <button type="button" class="mode-pill" id="tabFontMaker">✒️ 字体制作器 (拍照做字库)</button>
       </div>
     </header>
 
-    <!-- ================= VIEW 1: HOME (请选择空表PDF - Screenshot 2) ================= -->
+    <!-- ================= VIEW 1: HOME (请选择空表/稿纸PDF - 8大双页PDF示例) ================= -->
     <main class="home-view" id="homeView">
-      <div class="examples-showcase">
-        <button type="button" class="example-card landscape" id="btnExample1" title="点击加载示例1：晨、午检体温登记表">
-          <img id="imgExample1Preview" alt="示例1：晨、午检体温登记表">
-          <span class="example-badge">示例1</span>
-        </button>
-        <button type="button" class="example-card portrait" id="btnExample2" title="点击加载示例2：学生视力自测登记表">
-          <img id="imgExample2Preview" alt="示例2：学生视力自测登记表">
-          <span class="example-badge">示例2</span>
-        </button>
+      <div class="examples-showcase" id="examplesShowcaseGrid">
+        <!-- Populated dynamically from window.HANDWRITE_EXAMPLES (8 multi-page PDF examples) -->
       </div>
-      <h1 class="home-title">请选择空表PDF</h1>
+      <h1 class="home-title">请选择空表 / 作文纸 / 草稿纸 PDF（点击上方 8 个双页示例一键体验）</h1>
       <div class="home-actions">
-        <button type="button" class="home-btn" id="btnHomeSelectPdf">选择 PDF</button>
+        <button type="button" class="home-btn" id="btnHomeSelectPdf">选择本地 PDF</button>
         <button type="button" class="home-btn" id="btnHomeLoadProject">加载项目</button>
         <button type="button" class="home-btn" id="btnHomeOpenFontMaker">制作手写字体</button>
       </div>
@@ -59,8 +52,8 @@
           </label>
           <div class="drag-mode-bar" role="group" aria-label="画布鼠标拖动模式">
             <span class="drag-mode-label">拖动模式:</span>
-            <button type="button" class="drag-mode-btn active" data-drag-mode="char" title="直接点住任意一个手写数字字符单独拖动位置">单字</button>
-            <button type="button" class="drag-mode-btn" data-drag-mode="cell" title="点住任意一格的数字整体单独拖动">单格</button>
+            <button type="button" class="drag-mode-btn active" data-drag-mode="char" title="直接点住任意一个手写汉字/字母/数字单独拖动位置">单字</button>
+            <button type="button" class="drag-mode-btn" data-drag-mode="cell" title="点住任意一格/单行内容整体单独拖动">单格</button>
             <button type="button" class="drag-mode-btn" data-drag-mode="row" title="点住任意一行直接整行上下/左右单独拖动">整行</button>
             <button type="button" class="drag-mode-btn" data-drag-mode="pan" title="左键拖动平移画布视野（其他模式下拖空白处或按中键也可平移画布）">画布</button>
             <button type="button" class="icon-btn" id="btnResetCustomOffsets" title="重置所有单字/单格/单行/单列的独立拖动微调" aria-label="重置独立拖动">↺</button>
@@ -79,6 +72,16 @@
         </div>
 
         <div class="toolbar-right">
+          <select id="quickExampleSelect" class="page-select" style="height:28px;max-width:195px;" title="快速切换内置的 8 个双页 PDF 表格/作文纸/草稿纸示例" aria-label="快速切换示例">
+            <option value="example1">📂 示例1: 晨午检体温表(2页)</option>
+            <option value="example2">📂 示例2: 学生视力登记表(2页)</option>
+            <option value="example3">📂 示例3: 实验考勤与中英评定表(2页)</option>
+            <option value="example4">📂 示例4: 实验室温湿度巡检表(2页)</option>
+            <option value="example5">📂 示例5: 中文方格作文纸 20×20(2页)</option>
+            <option value="example6">📂 示例6: 英语横线手写作文纸(2页)</option>
+            <option value="example7">📂 示例7: 空白数学物理草稿纸(2页)</option>
+            <option value="example8">📂 示例8: 中英双语读书笔记纸(2页)</option>
+          </select>
           <button type="button" class="btn" id="btnRerollSeed" title="重新随机生成全部单元格手写字迹">🎲 换一批字迹</button>
           <button type="button" class="btn" id="btnReselectPdf">重新选择PDF</button>
           <button type="button" class="btn" id="btnLoadProject">加载项目</button>
@@ -184,42 +187,64 @@
           <div class="control-card">
             <div class="card-header">
               <div class="card-title-group">
-                <h2 class="card-title">填写内容</h2>
+                <h2 class="card-title">填写内容 (数字 / 汉字 / 英语)</h2>
               </div>
             </div>
 
             <div class="fill-tabs">
-              <button type="button" class="fill-tab active" id="tabFillRandom">随机填写数字</button>
-              <button type="button" class="fill-tab" id="tabFillManual">手动输入</button>
+              <button type="button" class="fill-tab active" id="tabFillRandom">随机填写</button>
+              <button type="button" class="fill-tab" id="tabFillManual">手动表格</button>
+              <button type="button" class="fill-tab" id="tabFillArticle">文章/稿纸</button>
             </div>
 
             <div class="fill-panel-box" id="panelFillRandom">
-              <div class="slots-header">
-                <span style="font-size:12.5px;color:#333;">数位顺序</span>
-                <div style="display:flex;align-items:center;gap:6px;">
+              <div class="slots-header" style="flex-wrap:wrap;gap:6px;">
+                <span style="font-size:12.5px;color:#333;">数位/字符槽</span>
+                <div style="display:flex;align-items:center;gap:4px;flex-wrap:wrap;">
                   <button type="button" class="btn" id="btnPresetTemp" title="一键设为体温 36.1~36.9">体温 36.x</button>
                   <button type="button" class="btn" id="btnPresetVision" title="一键设为视力 4.3~5.1">视力 4.3-5.1</button>
-                  <button type="button" class="btn" id="btnAddDigitSlot">+ 添加数位</button>
+                  <button type="button" class="btn" id="btnPresetCnStatus" title="一键设为随机中文状态词（正常/良好/合格/已检）">汉字状态</button>
+                  <button type="button" class="btn" id="btnPresetEnGrade" title="一键设为随机英语评级（A+/A/A-/B+）">英文评级</button>
+                  <button type="button" class="btn" id="btnAddDigitSlot">+ 添加槽位</button>
                 </div>
               </div>
               <div class="slots-list" id="digitSlotsList"></div>
             </div>
 
             <div class="fill-panel-box" id="panelFillManual" hidden>
-              <p style="margin:0 0 10px 0;font-size:12px;color:#555;">当前为手动/表格数据模式，可逐格编辑或一键生成真实视力/体温数据。</p>
-              <div style="display:flex;gap:8px;flex-wrap:wrap;">
+              <p style="margin:0 0 8px 0;font-size:12px;color:#555;">支持在表格中自由输入任意<b>手写汉字、英语字母、单词或数字</b>，或一键填入仿真数据：</p>
+              <div style="display:flex;gap:6px;flex-wrap:wrap;">
                 <button type="button" class="btn btn-primary" id="btnOpenManualModal">✎ 打开手动输入表格</button>
-                <button type="button" class="btn" id="btnRegenManualVision">🎲 随机生成视力表 (4.3~5.1)</button>
-                <button type="button" class="btn" id="btnRegenManualTemp">🎲 随机生成体温表 (36.1~36.9)</button>
+                <button type="button" class="btn" id="btnRegenManualVision">🎲 视力表 (4.3~5.1)</button>
+                <button type="button" class="btn" id="btnRegenManualTemp">🎲 体温表 (36.1~36.9)</button>
+                <button type="button" class="btn" id="btnRegenManualCourse">🎲 中文评语+英文等级表</button>
+                <button type="button" class="btn" id="btnRegenManualLab">🎲 实验室中英巡检表</button>
+                <button type="button" class="btn" id="btnRegenManualBilingual">🎲 中英双语词汇摘抄</button>
               </div>
+            </div>
+
+            <div class="fill-panel-box" id="panelFillArticle" hidden>
+              <div class="control-row" style="margin-bottom:8px;">
+                <label class="row-label" for="articleLayoutSelect" style="width:62px;">排版模式</label>
+                <select id="articleLayoutSelect" class="page-select" style="flex:1;height:28px;">
+                  <option value="grid">方格作文纸 (一字一格 · 自动首行缩进)</option>
+                  <option value="lines">横线/空白草稿纸 (中英流式自然手写)</option>
+                </select>
+              </div>
+              <div style="display:flex;gap:5px;flex-wrap:wrap;margin-bottom:8px;">
+                <button type="button" class="btn" id="btnSampleCnEssay">📝 中文散文范文</button>
+                <button type="button" class="btn" id="btnSampleEnEssay">🔤 英语作文范文</button>
+                <button type="button" class="btn" id="btnSampleScratch">📐 数学物理演算草稿</button>
+              </div>
+              <textarea id="articleTextarea" class="article-textarea" rows="6" placeholder="在此输入或粘贴任意中文作文、英语短文、读书笔记或数学公式草稿，画布将实时生成逼真手写笔迹..."></textarea>
             </div>
           </div>
 
-          <!-- Card 4: 字体 -->
+          <!-- Card 4: 字体与手写风格 -->
           <div class="control-card">
             <div class="card-header">
               <div class="card-title-group">
-                <h2 class="card-title">字体</h2>
+                <h2 class="card-title">字体与手写风格</h2>
               </div>
               <div class="card-tools">
                 <button type="button" class="btn" id="btnGoMakeFont">✒️ 制作新字体</button>
@@ -227,6 +252,17 @@
             </div>
             <div class="control-row">
               <select id="fontSelect" class="page-select" style="width:100%;height:32px;" aria-label="选择手写字体"></select>
+            </div>
+            <div class="control-row" style="margin-top:8px;">
+              <label class="row-label" for="inkColorSelect" style="width:62px;">墨水颜色</label>
+              <select id="inkColorSelect" class="page-select" style="flex:1;height:28px;" aria-label="选择墨水颜色">
+                <option value="#161616">⚫ 纯黑中性笔 (0.5mm 碳素黑)</option>
+                <option value="#282a2e">⚫ 柔和碳素墨水 (自然深灰黑)</option>
+                <option value="#1b365d">🔵 蓝黑钢笔墨水 (经典档案蓝黑)</option>
+                <option value="#1d4ed8">🔵 深蓝圆珠笔 / 中性笔 (经典蓝)</option>
+                <option value="#4b5563">✏️ 2B 铅笔灰 (演算草稿质感)</option>
+                <option value="#c81e1e">🔴 教师批阅红笔 (批注/评分红)</option>
+              </select>
             </div>
             <div class="control-row" style="margin-top:8px;">
               <label class="checkbox-inline" for="chkNormalizeFontSize" style="margin-left:0;">
@@ -436,10 +472,13 @@
   <!-- ================= DIALOG 1: 手动输入表格 (Screenshot 8) ================= -->
   <dialog id="dialogManualInput" aria-labelledby="dialogManualTitle" closedby="any">
     <div class="modal-header">
-      <h2 class="modal-title" id="dialogManualTitle">✎ 手动输入</h2>
-      <div style="display:flex;align-items:center;gap:8px;">
+      <h2 class="modal-title" id="dialogManualTitle">✎ 手动输入表格 (支持汉字 / 英语字母 / 数字混排)</h2>
+      <div style="display:flex;align-items:center;gap:6px;flex-wrap:wrap;">
         <button type="button" class="btn" id="btnModalFillVision">随机视力 (4.3-5.1)</button>
         <button type="button" class="btn" id="btnModalFillTemp">随机体温 (36.1-36.9)</button>
+        <button type="button" class="btn" id="btnModalFillCourse">中文评语+英文等级</button>
+        <button type="button" class="btn" id="btnModalFillLab">实验室巡检数据</button>
+        <button type="button" class="btn" id="btnModalFillBilingual">中英双语词汇</button>
         <button type="button" class="btn btn-primary" id="btnSaveManualModal">保存更改</button>
         <button type="button" class="icon-btn" id="btnCloseManualModal" aria-label="关闭">✕</button>
       </div>
@@ -451,29 +490,36 @@
     </div>
   </dialog>
 
-  <!-- ================= DIALOG 2: 修改数位 (Video f_30.6.jpg) ================= -->
-  <dialog id="dialogEditSlot" aria-labelledby="dialogEditSlotTitle" closedby="any" style="min-width:360px;">
+  <!-- ================= DIALOG 2: 修改数位/字符槽 (Video f_30.6.jpg) ================= -->
+  <dialog id="dialogEditSlot" aria-labelledby="dialogEditSlotTitle" closedby="any" style="min-width:400px;">
     <div class="modal-header">
-      <h2 class="modal-title" id="dialogEditSlotTitle">✎ 修改数位</h2>
+      <h2 class="modal-title" id="dialogEditSlotTitle">✎ 修改数位 / 汉字 / 英语字符槽</h2>
       <button type="button" class="icon-btn" id="btnCloseSlotModal" aria-label="关闭">✕</button>
     </div>
     <div class="modal-body">
-      <div class="control-row" style="margin-bottom:16px;">
+      <div class="control-row" style="margin-bottom:14px;">
         <label class="row-label" for="slotTypeSelect">类型</label>
         <select id="slotTypeSelect" class="page-select" style="flex:1;height:32px;">
-          <option value="digit">数字</option>
-          <option value="dot">小数点</option>
+          <option value="digit">数字 (0 - 9)</option>
+          <option value="dot">小数点 ( . )</option>
+          <option value="cn_words">手写汉字 / 常用评语词库</option>
+          <option value="en_letters">英语字母 / 等级 (A-Z, a-z, A+)</option>
+          <option value="custom_pool">自定义候选汉字 / 单词 / 符号</option>
         </select>
       </div>
       <div id="slotDigitsWrap">
         <div style="display:flex;align-items:center;justify-content:space-between;">
-          <span style="font-size:13px;color:#333;">数字</span>
+          <span style="font-size:13px;color:#333;" id="slotChecksTitle">候选池勾选</span>
           <div style="display:flex;gap:6px;">
             <button type="button" class="btn" id="btnSlotSelectAll" style="height:24px;font-size:11.5px;">全选</button>
             <button type="button" class="btn" id="btnSlotSelectClear" style="height:24px;font-size:11.5px;">清空</button>
           </div>
         </div>
         <div class="digit-check-grid" id="slotDigitChecks"></div>
+      </div>
+      <div id="slotCustomPoolWrap" hidden style="margin-top:10px;">
+        <label for="slotCustomPoolInput" style="display:block;font-size:12.5px;color:#333;margin-bottom:6px;">输入候选汉字、英文或数字（用逗号或空格分隔，每次随机抽取一项）：</label>
+        <input type="text" id="slotCustomPoolInput" class="num-input" style="width:100%;height:32px;text-align:left;padding:0 8px;" value="正常, 良好, 优秀, 合格, A+, Pass">
       </div>
       <div style="display:flex;justify-content:center;gap:14px;margin-top:16px;">
         <button type="button" class="btn btn-primary" id="btnSlotOk" style="min-width:96px;justify-content:center;">OK</button>
@@ -535,10 +581,10 @@
   </dialog>
 
   <!-- Local Bundled Assets & Libraries -->
-  <script src="vendor/pdf.min.js?v=10"></script>
-  <script src="vendor/jspdf.umd.min.js?v=10"></script>
-  <script src="assets/default-font.js?v=10"></script>
-  <script src="assets/examples-data.js?v=10"></script>
-  <script src="app.js?v=10"></script>
+  <script src="vendor/pdf.min.js?v=11"></script>
+  <script src="vendor/jspdf.umd.min.js?v=11"></script>
+  <script src="assets/default-font.js?v=11"></script>
+  <script src="assets/examples-data.js?v=11"></script>
+  <script src="app.js?v=11"></script>
 </body>
 </html>
