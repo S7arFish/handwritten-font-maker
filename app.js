@@ -169,14 +169,18 @@
     const H = 64;
     const isCJK = /[\u3000-\u9fff\uff00-\uffef]/.test(ch);
     const baseFontPx = isCJK ? 41 : 43;
-    const slantBias = font.slantBias || 0;
+    const sp = font.styleProfile || null;
+    const slantBias = sp ? sp.slantBias : font.slantBias || 0;
+    const profileSX = sp ? sp.aspectScaleX : 1.0;
+    const profileSY = sp ? sp.aspectScaleY : 1.0;
+    const profilePress = sp ? sp.strokePress : 0.25;
 
     const microTransforms = [
-      { famIdx: 0, sx: 1.0, sy: 1.0, kx: slantBias - 0.03, ky: -0.01, press: 0.22 },
-      { famIdx: 0, sx: 0.97, sy: 1.03, kx: slantBias + 0.02, ky: 0.015, press: 0.30 },
-      { famIdx: 0, sx: 1.03, sy: 0.98, kx: slantBias - 0.05, ky: -0.015, press: 0.18 },
-      { famIdx: 1, sx: 0.99, sy: 1.01, kx: slantBias + 0.01, ky: 0.01, press: 0.26 },
-      { famIdx: 0, sx: 0.98, sy: 1.02, kx: slantBias - 0.02, ky: 0.02, press: 0.32 }
+      { famIdx: 0, sx: 1.0 * profileSX, sy: 1.0 * profileSY, kx: slantBias - 0.03, ky: -0.01, press: profilePress },
+      { famIdx: 0, sx: 0.97 * profileSX, sy: 1.03 * profileSY, kx: slantBias + 0.02, ky: 0.015, press: Math.min(0.6, profilePress + 0.06) },
+      { famIdx: 0, sx: 1.03 * profileSX, sy: 0.98 * profileSY, kx: slantBias - 0.05, ky: -0.015, press: Math.max(0.1, profilePress - 0.05) },
+      { famIdx: 1, sx: 0.99 * profileSX, sy: 1.01 * profileSY, kx: slantBias + 0.01, ky: 0.01, press: profilePress + 0.02 },
+      { famIdx: 0, sx: 0.98 * profileSX, sy: 1.02 * profileSY, kx: slantBias - 0.02, ky: 0.02, press: Math.min(0.6, profilePress + 0.08) }
     ];
 
     for (let v = 0; v < microTransforms.length; v++) {
@@ -294,15 +298,17 @@
       });
       activeFontIndex = 0;
     } else {
+      const sp = fontData.styleProfile || null;
       const entry = {
         id: `custom_${fontsRegistry.length}`,
         name: fontData.name || `自定义手写字体 #${fontsRegistry.length + 1}`,
         useRealDigits: true,
         primaryFont: BUILTIN_HANDWRITE_STYLES[0].primaryFont,
         secondaryFont: BUILTIN_HANDWRITE_STYLES[0].secondaryFont,
-        slantBias: -0.02,
+        slantBias: sp ? sp.slantBias : -0.02,
+        styleProfile: sp,
         glyphs: loadedGlyphs,
-        totalCount: `${totalCount}实拍+全字库中英`,
+        totalCount: sp ? `${totalCount}实拍字形 + 个人笔迹特征迁移` : `${totalCount}实拍+全字库中英`,
         synthCache: {},
         tintedCache: {}
       };
@@ -1291,7 +1297,13 @@ Practice makes perfect: ABCDEFGHIJKLMNOPQRSTUVWXYZ & abcdefghijklmnopqrstuvwxyz 
         if (isDot) {
           normScale = (baseDigitHeight * 0.22) / Math.max(6, g.h);
         } else {
-          const targetH = ch === '0' ? baseDigitHeight * 0.68 : baseDigitHeight * 0.84;
+          const isCJKChar = /[\u3000-\u9fff\uff00-\uffef]/.test(ch);
+          const isLowerX = /^[acemnorsuvwxz]$/.test(ch);
+          const targetH = isCJKChar
+            ? baseDigitHeight * 0.96
+            : ch === '0' || isLowerX
+            ? baseDigitHeight * 0.68
+            : baseDigitHeight * 0.84;
           const fullNorm = targetH / Math.max(12, g.h);
           normScale = naturalScale * 0.22 + fullNorm * 0.78;
         }
@@ -2062,7 +2074,7 @@ Practice makes perfect: ABCDEFGHIJKLMNOPQRSTUVWXYZ & abcdefghijklmnopqrstuvwxyz 
   }
 
   // =========================================================================
-  // MODULE A: 字体制作器 (Font Maker - 3-Step Pipeline, Screenshots 10-13)
+  // MODULE A: 字体制作器 (Font Maker - 支持汉字 / 英语字母 / 数字 3步实拍提取 + 笔迹特征迁移)
   // =========================================================================
   const CATEGORY_COLORS = {
     '1': '#d97706',
@@ -2077,9 +2089,20 @@ Practice makes perfect: ABCDEFGHIJKLMNOPQRSTUVWXYZ & abcdefghijklmnopqrstuvwxyz 
     '0': '#dc2626',
     '.': '#db2777'
   };
-  const CATEGORY_ORDER = ['1', '2', '3', '4', '5', '6', '7', '8', '9', '0', '.'];
+  const PALETTE_COLORS = [
+    '#d97706', '#b4831e', '#4d8b31', '#1f9d55', '#15803d',
+    '#0d9488', '#0284c7', '#2563eb', '#4f46e5', '#7c3aed',
+    '#9333ea', '#c026d3', '#db2777', '#e11d48', '#dc2626', '#ea580c'
+  ];
+
+  const FM_MODE_PRESETS = {
+    digits: '1234567890.',
+    english: 'ABCDEFGHabcdefgh+-=.',
+    chinese: '正常合格优秀良好已查出席请假实验李明王华张伟AB+'
+  };
 
   const fmState = {
+    mode: 'digits', // 'digits' | 'english' | 'chinese'
     step: 0, // 0=welcome, 1=threshold, 2=boxes, 3=label
     sourceImg: null,
     grayArr: null,
@@ -2091,7 +2114,7 @@ Practice makes perfect: ABCDEFGHIJKLMNOPQRSTUVWXYZ & abcdefghijklmnopqrstuvwxyz 
     zoom: 100,
     panX: 40,
     panY: 20,
-    boxes: [], // [{ x, y, w, h, label: null | '1'..'9'|'0'|'.' }]
+    boxes: [], // [{ x, y, w, h, label: null | string }]
     history: [],
     historyIdx: -1,
     activeLabelCat: '1',
@@ -2099,6 +2122,219 @@ Practice makes perfect: ABCDEFGHIJKLMNOPQRSTUVWXYZ & abcdefghijklmnopqrstuvwxyz 
     contextBoxIdx: -1,
     marquee: null // { x0, y0, x1, y1 }
   };
+
+  function fmGetCategoryOrder() {
+    const inp = document.getElementById('fmCharsetInput');
+    const raw = (inp && inp.value) ? inp.value : FM_MODE_PRESETS[fmState.mode] || FM_MODE_PRESETS.digits;
+    const seen = new Set();
+    const out = [];
+    for (const ch of Array.from(raw)) {
+      if (ch.trim() === '') continue;
+      if (!seen.has(ch)) {
+        seen.add(ch);
+        out.push(ch);
+      }
+    }
+    return out.length > 0 ? out : ['1', '2', '3', '4', '5', '6', '7', '8', '9', '0', '.'];
+  }
+
+  function fmGetCategoryColor(cat) {
+    if (!cat) return '#0ea5e9';
+    if (CATEGORY_COLORS[cat]) return CATEGORY_COLORS[cat];
+    const code = cat.codePointAt(0) || 0;
+    return PALETTE_COLORS[code % PALETTE_COLORS.length];
+  }
+
+  // Synthesize a realistic photographed paper sheet for English / Chinese sample experience
+  function fmGenerateSampleHandwritingPhoto(mode) {
+    if (mode === 'digits' && window.DEFAULT_HANDWRITE_DATA && window.DEFAULT_HANDWRITE_DATA.sampleSheet) {
+      return window.DEFAULT_HANDWRITE_DATA.sampleSheet;
+    }
+    const chars = fmGetCategoryOrder().slice(0, 30);
+    const isRowMode = chars.length <= 12;
+    const w = 640;
+    const h = 480;
+    const c = document.createElement('canvas');
+    c.width = w;
+    c.height = h;
+    const ctx = c.getContext('2d');
+
+    // Realistic warm paper background with slight camera lighting gradient & grain
+    const grad = ctx.createLinearGradient(0, 0, w, h);
+    grad.addColorStop(0, '#f4f1ea');
+    grad.addColorStop(0.55, '#ebe6dc');
+    grad.addColorStop(1, '#ded8cc');
+    ctx.fillStyle = grad;
+    ctx.fillRect(0, 0, w, h);
+
+    const rng = mulberry32(mode === 'english' ? 202601 : 202602);
+    ctx.fillStyle = 'rgba(120, 110, 95, 0.035)';
+    for (let i = 0; i < 900; i++) {
+      ctx.fillRect(rng() * w, rng() * h, 1.5, 1.5);
+    }
+
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+
+    if (isRowMode) {
+      // Each character written 6 times across its own row
+      const rowH = Math.min(38, Math.floor((h - 48) / Math.max(1, chars.length)));
+      chars.forEach((ch, rIdx) => {
+        const cy = 28 + rIdx * rowH + rowH * 0.5;
+        for (let v = 0; v < 6; v++) {
+          const cx = 75 + v * 88 + (rng() - 0.5) * 6;
+          const vy = cy + (rng() - 0.5) * 3;
+          ctx.save();
+          ctx.translate(cx, vy);
+          ctx.rotate((rng() - 0.5) * 0.08);
+          ctx.transform(0.95 + rng() * 0.1, 0, -0.04 + (rng() - 0.5) * 0.04, 0.95 + rng() * 0.1, 0, 0);
+          ctx.font = '30px "HanziPen SC", "Xingkai SC", "Bradley Hand", "Kaiti SC", cursive';
+          ctx.fillStyle = `rgba(24, 26, 30, ${0.84 + rng() * 0.14})`;
+          ctx.fillText(ch, 0, 0);
+          ctx.restore();
+        }
+      });
+    } else {
+      // Grid layout: each character written 2 times (2 variants per character) in clean rows of 10
+      const items = [];
+      chars.forEach((ch) => {
+        items.push(ch, ch);
+      });
+      const cols = 10;
+      const rows = Math.ceil(items.length / cols);
+      const cellW = (w - 80) / cols;
+      const cellH = Math.min(58, (h - 56) / Math.max(1, rows));
+
+      items.forEach((ch, idx) => {
+        const r = Math.floor(idx / cols);
+        const col = idx % cols;
+        const cx = 40 + col * cellW + cellW * 0.5 + (rng() - 0.5) * 4;
+        const cy = 32 + r * cellH + cellH * 0.5 + (rng() - 0.5) * 3;
+        const isCJK = /[\u3000-\u9fff\uff00-\uffef]/.test(ch);
+        ctx.save();
+        ctx.translate(cx, cy);
+        ctx.rotate((rng() - 0.5) * 0.07);
+        ctx.transform(0.94 + rng() * 0.12, 0, -0.04 + (rng() - 0.5) * 0.05, 0.94 + rng() * 0.12, 0, 0);
+        ctx.font = `${isCJK ? 31 : 32}px "HanziPen SC", "Hannotate SC", "Bradley Hand", "Kaiti SC", cursive`;
+        ctx.fillStyle = `rgba(22, 24, 28, ${0.86 + rng() * 0.12})`;
+        ctx.fillText(ch, 0, 0);
+        ctx.restore();
+      });
+    }
+
+    return c.toDataURL('image/jpeg', 0.92);
+  }
+
+  function fmSwitchPresetMode(mode) {
+    fmState.mode = mode;
+    document.querySelectorAll('[data-fm-mode]').forEach((btn) => {
+      btn.classList.toggle('active', btn.dataset.fmMode === mode);
+    });
+    const inp = document.getElementById('fmCharsetInput');
+    if (inp && FM_MODE_PRESETS[mode]) {
+      inp.value = FM_MODE_PRESETS[mode];
+    }
+    const cats = fmGetCategoryOrder();
+    fmState.activeLabelCat = cats[0] || '1';
+    const sampleImg = document.getElementById('fmSamplePhotoImg');
+    if (sampleImg) {
+      sampleImg.src = fmGenerateSampleHandwritingPhoto(mode);
+    }
+  }
+
+  function fmExtractCurrentDocChars() {
+    const cfg = state.config;
+    let poolStr = '';
+    if (cfg.fillMode === 'article' && cfg.articleText) {
+      poolStr = cfg.articleText;
+    } else if (cfg.fillMode === 'manual' && Array.isArray(cfg.manualData)) {
+      poolStr = cfg.manualData.map((r) => (Array.isArray(r) ? r.join('') : '')).join('');
+    } else if (Array.isArray(cfg.slots)) {
+      poolStr = cfg.slots.map((s) => (s.digits ? s.digits.join('') : '')).join('');
+    }
+    const seen = new Set();
+    const extracted = [];
+    for (const ch of Array.from(poolStr)) {
+      if (ch.trim() === '') continue;
+      if (!seen.has(ch)) {
+        seen.add(ch);
+        extracted.push(ch);
+        if (extracted.length >= 45) break;
+      }
+    }
+    if (extracted.length === 0) {
+      showNoticeDialog('提取字表', '当前文档暂无可提取字符，已为您填入常用汉字与英文字符集。');
+      return;
+    }
+    const inp = document.getElementById('fmCharsetInput');
+    if (inp) inp.value = extracted.join('');
+    fmState.mode = 'chinese';
+    document.querySelectorAll('[data-fm-mode]').forEach((btn) => {
+      btn.classList.toggle('active', btn.dataset.fmMode === 'chinese');
+    });
+    const sampleImg = document.getElementById('fmSamplePhotoImg');
+    if (sampleImg) sampleImg.src = fmGenerateSampleHandwritingPhoto('chinese');
+    showNoticeDialog('提取当前文档字表成功', `已从当前文档提取 ${extracted.length} 个不重复字符，您可下载书写字帖或直接点击绿色按钮体验！`);
+  }
+
+  function fmDownloadTemplatePdf() {
+    if (!window.jspdf) return;
+    const chars = fmGetCategoryOrder();
+    const { jsPDF } = window.jspdf;
+    const doc = new jsPDF({ orientation: 'portrait', unit: 'cm', format: 'a4' });
+
+    const off = document.createElement('canvas');
+    off.width = 1240;
+    off.height = 1754;
+    const ctx = off.getContext('2d');
+    ctx.fillStyle = '#ffffff';
+    ctx.fillRect(0, 0, off.width, off.height);
+
+    ctx.fillStyle = '#1f2937';
+    ctx.font = 'bold 34px "PingFang SC", "Microsoft YaHei", sans-serif';
+    ctx.textAlign = 'center';
+    ctx.fillText('手写体生成器 · 专属汉字/英语/数字采集字帖', off.width / 2, 78);
+
+    ctx.fillStyle = '#4b5563';
+    ctx.font = '20px "PingFang SC", "Microsoft YaHei", sans-serif';
+    ctx.fillText('请在每个方格中央用黑笔书写 2 遍对应字符（勿压外框线），写完后拍照上传至「字体制作器」', off.width / 2, 118);
+
+    const cols = 8;
+    const cellS = 128;
+    const startX = (off.width - cols * cellS) / 2;
+    const startY = 156;
+
+    // 2 boxes per character so user gets 2 natural variants per character
+    const items = [];
+    chars.forEach((ch) => items.push(ch, ch));
+
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    items.slice(0, 80).forEach((ch, idx) => {
+      const r = Math.floor(idx / cols);
+      const c = idx % cols;
+      const x = startX + c * cellS;
+      const y = startY + r * cellS;
+
+      // Light green/blue outer border (easy to filter out or leave spacing)
+      ctx.strokeStyle = '#d1d5db';
+      ctx.lineWidth = 1.5;
+      ctx.strokeRect(x + 8, y + 8, cellS - 16, cellS - 16);
+
+      // Small corner reference label
+      ctx.fillStyle = '#9ca3af';
+      ctx.font = '16px sans-serif';
+      ctx.fillText(ch, x + 22, y + 24);
+
+      // Very faint watermark in center for tracing
+      ctx.fillStyle = 'rgba(209, 213, 219, 0.38)';
+      ctx.font = '64px "Kaiti SC", "STKaiti", serif';
+      ctx.fillText(ch, x + cellS / 2, y + cellS / 2 + 4);
+    });
+
+    doc.addImage(off.toDataURL('image/jpeg', 0.95), 'JPEG', 0, 0, 21.0, 29.7);
+    doc.save('手写字库采集字帖模板.pdf');
+  }
 
   function showNoticeDialog(title, msg) {
     const dlg = document.getElementById('dialogNotice');
@@ -2174,6 +2410,40 @@ Practice makes perfect: ABCDEFGHIJKLMNOPQRSTUVWXYZ & abcdefghijklmnopqrstuvwxyz 
     fmRenderCanvas();
   }
 
+  // Merge multi-part Chinese radicals (left-right, top-bottom) or 'i'/'j' dots into unified character boxes
+  function fmMergeNearbyRadicals(rawBoxes, maxCharW = 46, maxCharH = 48) {
+    const boxes = rawBoxes.map((b) => ({ ...b }));
+    let mergedAny = true;
+    while (mergedAny) {
+      mergedAny = false;
+      for (let i = 0; i < boxes.length; i++) {
+        for (let j = i + 1; j < boxes.length; j++) {
+          const a = boxes[i];
+          const b = boxes[j];
+          const nx0 = Math.min(a.x, b.x);
+          const ny0 = Math.min(a.y, b.y);
+          const nx1 = Math.max(a.x + a.w, b.x + b.w);
+          const ny1 = Math.max(a.y + a.h, b.y + b.h);
+          const nw = nx1 - nx0;
+          const nh = ny1 - ny0;
+
+          // Horizontal & vertical gap between boxes (negative means overlap)
+          const gapX = Math.max(0, Math.max(a.x, b.x) - Math.min(a.x + a.w, b.x + b.w));
+          const gapY = Math.max(0, Math.max(a.y, b.y) - Math.min(a.y + a.h, b.y + b.h));
+
+          if (nw <= maxCharW && nh <= maxCharH && gapX <= 11 && gapY <= 12) {
+            boxes[i] = { x: nx0, y: ny0, w: nw, h: nh, label: a.label || b.label || null };
+            boxes.splice(j, 1);
+            mergedAny = true;
+            break;
+          }
+        }
+        if (mergedAny) break;
+      }
+    }
+    return boxes;
+  }
+
   function fmRunAutoBoxDetection() {
     const w = fmState.width;
     const h = fmState.height;
@@ -2184,13 +2454,14 @@ Practice makes perfect: ABCDEFGHIJKLMNOPQRSTUVWXYZ & abcdefghijklmnopqrstuvwxyz 
       }
     }
 
-    // Dilate by 2px so multi-stroke digits ('4', '5') stay unified
+    // Dilate by 2px (digits) or 3px (Chinese/English) so multi-stroke characters stay unified
+    const dilateR = fmState.mode === 'digits' ? 2 : 3;
     const dilated = new Uint8Array(w * h);
-    for (let y = 2; y < h - 2; y++) {
-      for (let x = 2; x < w - 2; x++) {
+    for (let y = dilateR; y < h - dilateR; y++) {
+      for (let x = dilateR; x < w - dilateR; x++) {
         if (mask[y * w + x]) {
-          for (let dy = -2; dy <= 2; dy++) {
-            for (let dx = -2; dx <= 2; dx++) {
+          for (let dy = -dilateR; dy <= dilateR; dy++) {
+            for (let dx = -dilateR; dx <= dilateR; dx++) {
               dilated[(y + dy) * w + (x + dx)] = 1;
             }
           }
@@ -2199,9 +2470,10 @@ Practice makes perfect: ABCDEFGHIJKLMNOPQRSTUVWXYZ & abcdefghijklmnopqrstuvwxyz 
     }
 
     const visited = new Uint8Array(w * h);
-    const detected = [];
+    let detected = [];
     const qx = new Int32Array(w * h);
     const qy = new Int32Array(w * h);
+    const maxExtent = fmState.mode === 'digits' ? 52 : 96;
 
     for (let y = 6; y < h - 6; y++) {
       for (let x = 6; x < w - 6; x++) {
@@ -2252,12 +2524,16 @@ Practice makes perfect: ABCDEFGHIJKLMNOPQRSTUVWXYZ & abcdefghijklmnopqrstuvwxyz 
             const by = Math.max(0, minY - 3);
             const bw = Math.min(w - bx, maxX - minX + 7);
             const bh = Math.min(h - by, maxY - minY + 7);
-            if (bw <= 52 && bh <= 52) {
+            if (bw <= maxExtent && bh <= maxExtent) {
               detected.push({ x: bx, y: by, w: bw, h: bh, label: null });
             }
           }
         }
       }
+    }
+
+    if (fmState.mode !== 'digits') {
+      detected = fmMergeNearbyRadicals(detected, 46, 48);
     }
 
     // Sort top-to-bottom, left-to-right
@@ -2268,9 +2544,8 @@ Practice makes perfect: ABCDEFGHIJKLMNOPQRSTUVWXYZ & abcdefghijklmnopqrstuvwxyz 
     fmPushHistory();
   }
 
-  function fmAutoLabelByRows() {
-    if (!fmState.boxes.length) return;
-    const sorted = [...fmState.boxes].sort((a, b) => a.y + a.h / 2 - (b.y + b.h / 2));
+  function fmGroupBoxesIntoRows(boxes) {
+    const sorted = [...boxes].sort((a, b) => a.y + a.h / 2 - (b.y + b.h / 2));
     const rows = [];
     for (const b of sorted) {
       const yc = b.y + b.h / 2;
@@ -2286,19 +2561,53 @@ Practice makes perfect: ABCDEFGHIJKLMNOPQRSTUVWXYZ & abcdefghijklmnopqrstuvwxyz 
         }
       }
     }
-    const validRows = rows.filter((r) => r.length >= 3);
+    rows.forEach((r) => r.sort((a, b) => a.x - b.x));
+    return rows;
+  }
+
+  function fmAutoLabelByRows() {
+    if (!fmState.boxes.length) return;
+    const cats = fmGetCategoryOrder();
+    // If there are more target categories than rows (e.g. grid layout of 20 Chinese/English chars), use sequential grid labeling!
+    const rows = fmGroupBoxesIntoRows(fmState.boxes);
+    const validRows = rows.filter((r) => r.length >= 2);
+    if (cats.length > validRows.length + 2) {
+      fmAutoLabelSequential();
+      return;
+    }
+
     validRows.forEach((row, rIdx) => {
-      if (rIdx >= CATEGORY_ORDER.length) return;
-      const cat = CATEGORY_ORDER[rIdx];
+      if (rIdx >= cats.length) return;
+      const cat = cats[rIdx];
       row.forEach((b) => {
-        // Skip obvious huge scratched-out mistakes
-        if ((cat === '5' || cat === '6') && (b.h > 38 || b.w > 42)) {
+        if (fmState.mode === 'digits' && (cat === '5' || cat === '6') && (b.h > 38 || b.w > 42)) {
           b.label = null;
         } else {
           b.label = cat;
         }
       });
     });
+    fmPushHistory();
+    fmRenderBottomCategories();
+    fmRenderPreviewCanvas();
+    fmRenderCanvas();
+  }
+
+  // Sequential grid auto-labeling: sorts top-to-bottom rows, left-to-right columns, and maps to character sequence
+  function fmAutoLabelSequential() {
+    if (!fmState.boxes.length) return;
+    const cats = fmGetCategoryOrder();
+    const rows = fmGroupBoxesIntoRows(fmState.boxes);
+    const orderedBoxes = [];
+    rows.forEach((r) => orderedBoxes.push(...r));
+
+    // Detect if each character was written twice consecutively (e.g. 2 variants per char in grid)
+    const repeatsPerChar = Math.max(1, Math.round(orderedBoxes.length / Math.max(1, cats.length)));
+    orderedBoxes.forEach((b, idx) => {
+      const catIdx = Math.floor(idx / repeatsPerChar) % cats.length;
+      b.label = cats[catIdx];
+    });
+
     fmPushHistory();
     fmRenderBottomCategories();
     fmRenderPreviewCanvas();
@@ -2322,6 +2631,7 @@ Practice makes perfect: ABCDEFGHIJKLMNOPQRSTUVWXYZ & abcdefghijklmnopqrstuvwxyz 
     const btnPrev = document.getElementById('btnFmPrevStep');
     const btnUndo = document.getElementById('btnFmUndo');
     const btnRedo = document.getElementById('btnFmRedo');
+    const btnMerge = document.getElementById('btnFmMergeRadicals');
     const tolBar = document.getElementById('fmToleranceBar');
     const prevWrap = document.getElementById('fmStep3PreviewWrap');
     const btnNext = document.getElementById('btnFmNextStep');
@@ -2336,30 +2646,32 @@ Practice makes perfect: ABCDEFGHIJKLMNOPQRSTUVWXYZ & abcdefghijklmnopqrstuvwxyz 
       btnPrev.hidden = true;
       btnUndo.hidden = true;
       btnRedo.hidden = true;
+      if (btnMerge) btnMerge.hidden = true;
       tolBar.hidden = false;
       prevWrap.hidden = true;
       btnNext.hidden = false;
       btnExport.hidden = true;
       botBar.hidden = true;
       hud.innerHTML = '<div>滚轮：放大缩小检查</div><div>鼠标中键：拖动</div>';
-      statusTxt.textContent = '第一步：调节容差滑块，使背景变为透明棋盘格、手写笔画清晰';
+      statusTxt.textContent = '第一步：调节容差滑块，使背景变为透明棋盘格、手写汉字/英语/数字笔画清晰';
     } else if (step === 2) {
       titleEl.textContent = '第二步：框字';
       btnReup.hidden = true;
       btnPrev.hidden = false;
       btnUndo.hidden = false;
       btnRedo.hidden = false;
+      if (btnMerge) btnMerge.hidden = false;
       tolBar.hidden = true;
       prevWrap.hidden = true;
       btnNext.hidden = false;
       btnExport.hidden = true;
       botBar.hidden = true;
       hud.innerHTML =
-        '<div>滚轮：缩放画布</div><div>鼠标中键：拖动</div><div>右键：删除字框</div><div>拖动字框：调整位置</div><div>拖动四角：调整大小</div><div>在空白处拖动：补充字框</div>';
-      statusTxt.textContent = 'AI 已经预框选数字，请核对！';
+        '<div>滚轮：缩放画布</div><div>鼠标中键：拖动</div><div>右键：删除字框</div><div>拖动字框：调整位置</div><div>在空白处拖动：补充字框</div>';
+      statusTxt.textContent = 'AI 已自动框选手写字符（支持智能合并汉字左右/上下偏旁），请核对！';
       if (fmState.boxes.length === 0) {
         fmRunAutoBoxDetection();
-        showNoticeDialog('自动框字完成', 'AI 已经预框选数字，请核对！');
+        showNoticeDialog('自动框字完成', `AI 已自动框选出 ${fmState.boxes.length} 个手写字符框（已启用汉字偏旁与点画智能聚合），请核对！`);
       }
     } else if (step === 3) {
       titleEl.textContent = '第三步：标注';
@@ -2367,14 +2679,19 @@ Practice makes perfect: ABCDEFGHIJKLMNOPQRSTUVWXYZ & abcdefghijklmnopqrstuvwxyz 
       btnPrev.hidden = false;
       btnUndo.hidden = false;
       btnRedo.hidden = false;
+      if (btnMerge) btnMerge.hidden = true;
       tolBar.hidden = true;
       prevWrap.hidden = false;
       btnNext.hidden = true;
       btnExport.hidden = false;
       botBar.hidden = false;
       hud.innerHTML =
-        '<div>点击下方数字：进入标注模式</div><div>点击字框：标注一个数字</div><div>拖动框选：批量标注</div><div>再次点击数字：退出标注模式</div><div>鼠标中键：拖动</div>';
-      statusTxt.textContent = '拖动红框批量框选一整行即可快速标注对应数字，或点击右上角“一键按行标注”';
+        '<div>点击下方字符：进入标注模式</div><div>点击字框：单字标注</div><div>拖动框选：批量标注</div><div>右上角支持：按行一键标注 / 按顺序逐格标注</div>';
+      statusTxt.textContent = '可点击右上角“⚡按行一键标注”或“⚡按顺序逐格标注”，也可点击底部字符框选标注';
+      const cats = fmGetCategoryOrder();
+      if (!cats.includes(fmState.activeLabelCat)) {
+        fmState.activeLabelCat = cats[0] || '1';
+      }
       fmRenderBottomCategories();
       fmRenderPreviewCanvas();
     }
@@ -2385,7 +2702,8 @@ Practice makes perfect: ABCDEFGHIJKLMNOPQRSTUVWXYZ & abcdefghijklmnopqrstuvwxyz 
     const bar = document.getElementById('fmBottomBar');
     if (!bar) return;
     bar.innerHTML = '';
-    for (const cat of CATEGORY_ORDER) {
+    const cats = fmGetCategoryOrder();
+    for (const cat of cats) {
       const count = fmState.boxes.filter((b) => b.label === cat).length;
       const item = document.createElement('div');
       item.className = 'fm-cat-item';
@@ -2394,7 +2712,7 @@ Practice makes perfect: ABCDEFGHIJKLMNOPQRSTUVWXYZ & abcdefghijklmnopqrstuvwxyz 
       btn.type = 'button';
       btn.className = 'fm-cat-btn' + (fmState.activeLabelCat === cat ? ' active' : '');
       btn.textContent = cat;
-      btn.style.background = count > 0 || fmState.activeLabelCat === cat ? CATEGORY_COLORS[cat] : '#383838';
+      btn.style.background = count > 0 || fmState.activeLabelCat === cat ? fmGetCategoryColor(cat) : '#383838';
       btn.addEventListener('click', () => {
         fmState.activeLabelCat = fmState.activeLabelCat === cat ? null : cat;
         fmRenderBottomCategories();
@@ -2415,15 +2733,11 @@ Practice makes perfect: ABCDEFGHIJKLMNOPQRSTUVWXYZ & abcdefghijklmnopqrstuvwxyz 
     const pctx = pCanvas.getContext('2d');
     pctx.clearRect(0, 0, pCanvas.width, pCanvas.height);
 
-    // Draw "2 / 2" or labeled sample digits in white like Screenshot 13
-    const sampleTwo = fmState.boxes.filter((b) => b.label === '2');
+    const cats = fmGetCategoryOrder();
+    const previewChars = cats.slice(0, 4).join(' ');
     pctx.fillStyle = '#ffffff';
-    pctx.font = 'italic 26px serif';
-    if (sampleTwo.length >= 2) {
-      pctx.fillText('2 / 2', 24, 32);
-    } else {
-      pctx.fillText('2 / 2', 24, 32);
-    }
+    pctx.font = 'italic 22px "HanziPen SC", "Kaiti SC", serif';
+    pctx.fillText(previewChars || '2 / 2', 12, 30);
   }
 
   function fmRenderCanvas() {
@@ -2460,13 +2774,13 @@ Practice makes perfect: ABCDEFGHIJKLMNOPQRSTUVWXYZ & abcdefghijklmnopqrstuvwxyz 
       fmState.boxes.forEach((b, idx) => {
         const color =
           fmState.step === 3 && b.label
-            ? CATEGORY_COLORS[b.label]
+            ? fmGetCategoryColor(b.label)
             : '#0ea5e9';
         ctx.strokeStyle = color;
         ctx.lineWidth = idx === fmState.selectedBoxIdx ? 2 : 1.3;
         ctx.strokeRect(b.x, b.y, b.w, b.h);
 
-        // Top-left tag ("未标注" or digit label)
+        // Top-left tag ("未标注" or character label)
         const tagText = fmState.step === 3 && b.label ? b.label : '未标注';
         const tw = Math.max(18, ctx.measureText(tagText).width + 8);
         ctx.fillStyle = color;
@@ -2519,21 +2833,99 @@ Practice makes perfect: ABCDEFGHIJKLMNOPQRSTUVWXYZ & abcdefghijklmnopqrstuvwxyz 
     fmState.panY = Math.round((vh - fmState.height * (fmState.zoom / 100)) / 2);
   }
 
-  async function fmExportCustomFont() {
-    const labeledBoxes = fmState.boxes.filter((b) => b.label);
-    if (labeledBoxes.length === 0) {
-      // Auto-label if user hasn't labeled yet so it never fails!
-      fmAutoLabelByRows();
+  // Extract user's personal handwriting geometry & ink density features from photographed boxes
+  function fmComputeUserStyleProfile(labeledBoxes, alphaArr, w, h) {
+    if (!labeledBoxes || labeledBoxes.length === 0) {
+      return { aspectScaleX: 1.0, aspectScaleY: 1.0, slantBias: -0.03, strokePress: 0.26, desc: '标准手写特征' };
     }
+    let ratioSum = 0;
+    let ratioCount = 0;
+    let slantSum = 0;
+    let slantCount = 0;
+    let densitySum = 0;
+
+    for (const b of labeledBoxes) {
+      const bx = Math.max(0, Math.round(b.x));
+      const by = Math.max(0, Math.round(b.y));
+      const bw = Math.min(w - bx, Math.max(4, Math.round(b.w)));
+      const bh = Math.min(h - by, Math.max(4, Math.round(b.h)));
+
+      if (b.label !== '.' && b.label !== '1' && bw >= 8 && bh >= 10) {
+        ratioSum += bw / bh;
+        ratioCount++;
+      }
+
+      // Compute 2nd-order central moments (mu11 / mu02) to measure natural handwriting slant
+      let m00 = 0, m10 = 0, m01 = 0;
+      for (let yy = 0; yy < bh; yy++) {
+        for (let xx = 0; xx < bw; xx++) {
+          const a = alphaArr[(by + yy) * w + (bx + xx)] / 255;
+          if (a > 0.15) {
+            m00 += a;
+            m10 += xx * a;
+            m01 += yy * a;
+          }
+        }
+      }
+      if (m00 > 8) {
+        const cx = m10 / m00;
+        const cy = m01 / m00;
+        let mu11 = 0, mu02 = 0;
+        for (let yy = 0; yy < bh; yy++) {
+          for (let xx = 0; xx < bw; xx++) {
+            const a = alphaArr[(by + yy) * w + (bx + xx)] / 255;
+            if (a > 0.15) {
+              mu11 += (xx - cx) * (yy - cy) * a;
+              mu02 += (yy - cy) * (yy - cy) * a;
+            }
+          }
+        }
+        if (mu02 > 1) {
+          slantSum += mu11 / mu02;
+          slantCount++;
+        }
+        densitySum += m00 / (bw * bh);
+      }
+    }
+
+    const avgRatio = ratioCount > 0 ? ratioSum / ratioCount : 0.88;
+    const aspectScaleX = Math.max(0.84, Math.min(1.16, avgRatio / 0.88));
+    const aspectScaleY = Math.max(0.88, Math.min(1.14, 1 / Math.sqrt(aspectScaleX)));
+    const rawSlant = slantCount > 0 ? slantSum / slantCount : -0.03;
+    const slantBias = Math.max(-0.16, Math.min(0.16, rawSlant * 0.45));
+    const avgDensity = densitySum / Math.max(1, labeledBoxes.length);
+    const strokePress = Math.max(0.14, Math.min(0.48, avgDensity * 1.15));
+
+    const shapeTag = aspectScaleX < 0.94 ? '修长型字身' : aspectScaleX > 1.06 ? '扁宽型字身' : '匀称方正字身';
+    const slantTag = slantBias < -0.02 ? '微向右倾' : slantBias > 0.02 ? '微向左倾' : '重心端正';
+    const weightTag = strokePress > 0.30 ? '饱满浓墨笔画' : '轻盈纤细笔画';
+
+    return {
+      aspectScaleX: Number(aspectScaleX.toFixed(3)),
+      aspectScaleY: Number(aspectScaleY.toFixed(3)),
+      slantBias: Number(slantBias.toFixed(3)),
+      strokePress: Number(strokePress.toFixed(3)),
+      desc: `${shapeTag} · ${slantTag} · ${weightTag}`
+    };
+  }
+
+  async function fmExportCustomFont() {
+    let labeledBoxes = fmState.boxes.filter((b) => b.label);
+    if (labeledBoxes.length === 0) {
+      fmAutoLabelByRows();
+      labeledBoxes = fmState.boxes.filter((b) => b.label);
+    }
+    const cats = fmGetCategoryOrder();
     const glyphs = {};
-    for (const k of CATEGORY_ORDER) glyphs[k] = [];
+    for (const k of cats) glyphs[k] = [];
 
     const w = fmState.width;
     const h = fmState.height;
     const off = document.createElement('canvas');
 
     for (const b of fmState.boxes) {
-      if (!b.label || !glyphs[b.label]) continue;
+      if (!b.label) continue;
+      if (!glyphs[b.label]) glyphs[b.label] = [];
       const bx = Math.max(0, Math.round(b.x));
       const by = Math.max(0, Math.round(b.y));
       const bw = Math.min(w - bx, Math.max(4, Math.round(b.w)));
@@ -2560,14 +2952,21 @@ Practice makes perfect: ABCDEFGHIJKLMNOPQRSTUVWXYZ & abcdefghijklmnopqrstuvwxyz 
       });
     }
 
+    const styleProfile = fmComputeUserStyleProfile(labeledBoxes, fmState.alphaArr, w, h);
     const totalSaved = Object.values(glyphs).reduce((s, arr) => s + arr.length, 0);
+    const uniqueChars = Object.keys(glyphs).filter((k) => glyphs[k].length > 0).length;
+    const modeLabel = fmState.mode === 'chinese' ? '汉字/中英' : fmState.mode === 'english' ? '英语字母' : '数字';
     const fontObj = {
-      name: `自制手写字体 #${fontsRegistry.length}`,
-      glyphs
+      name: `我的实拍${modeLabel}手写体 (${uniqueChars}字真迹 + 笔迹迁移)`,
+      glyphs,
+      styleProfile
     };
     await loadFontFromData(fontObj, true);
     renderCurrentPage();
-    showNoticeDialog('导出字体', `生成成功，共保存 ${totalSaved} 个字形`);
+    showNoticeDialog(
+      '导出个人手写字体成功',
+      `已保存 ${uniqueChars} 类字符共 ${totalSaved} 个实拍真迹切片！并提取您的个人笔迹特征【${styleProfile.desc}】自动应用至未拍摄汉字，已切换为当前字体！`
+    );
   }
 
   // =========================================================================
@@ -3306,11 +3705,37 @@ Practice makes perfect: ABCDEFGHIJKLMNOPQRSTUVWXYZ & abcdefghijklmnopqrstuvwxyz 
     );
 
     // =====================================================================
-    // Font Maker Event Listeners
+    // Font Maker Event Listeners (Digits / English / Chinese Modes)
     // =====================================================================
+    document.querySelectorAll('[data-fm-mode]').forEach((btn) => {
+      btn.addEventListener('click', () => fmSwitchPresetMode(btn.dataset.fmMode));
+    });
+
+    const fmCharsetInput = document.getElementById('fmCharsetInput');
+    if (fmCharsetInput) {
+      fmCharsetInput.addEventListener('input', () => {
+        const sampleImg = document.getElementById('fmSamplePhotoImg');
+        if (sampleImg && fmState.mode !== 'digits') {
+          sampleImg.src = fmGenerateSampleHandwritingPhoto(fmState.mode);
+        }
+      });
+    }
+
+    const btnFmExtractDocChars = document.getElementById('btnFmExtractDocChars');
+    if (btnFmExtractDocChars) {
+      btnFmExtractDocChars.addEventListener('click', fmExtractCurrentDocChars);
+    }
+
+    const btnFmDownloadTemplatePdf = document.getElementById('btnFmDownloadTemplatePdf');
+    if (btnFmDownloadTemplatePdf) {
+      btnFmDownloadTemplatePdf.addEventListener('click', fmDownloadTemplatePdf);
+    }
+
     const fileInputPhoto = document.getElementById('fileInputPhoto');
     document.getElementById('btnFmUploadPhoto').addEventListener('click', () => fileInputPhoto.click());
-    document.getElementById('btnFmReupload').addEventListener('click', () => fileInputPhoto.click());
+    document.getElementById('btnFmReupload').addEventListener('click', () => {
+      fmSetStep(0);
+    });
     fileInputPhoto.addEventListener('change', (e) => {
       const f = e.target.files && e.target.files[0];
       if (!f) return;
@@ -3327,7 +3752,7 @@ Practice makes perfect: ABCDEFGHIJKLMNOPQRSTUVWXYZ & abcdefghijklmnopqrstuvwxyz 
     document.getElementById('btnFmUseSamplePhoto').addEventListener('click', () => {
       const im = new Image();
       im.onload = () => fmLoadImageAndStartStep1(im);
-      im.src = window.DEFAULT_HANDWRITE_DATA.sampleSheet;
+      im.src = fmGenerateSampleHandwritingPhoto(fmState.mode);
     });
 
     document.getElementById('fmToleranceSlider').addEventListener('input', (e) => {
@@ -3366,7 +3791,20 @@ Practice makes perfect: ABCDEFGHIJKLMNOPQRSTUVWXYZ & abcdefghijklmnopqrstuvwxyz 
       }
     });
 
+    const btnFmMergeRadicals = document.getElementById('btnFmMergeRadicals');
+    if (btnFmMergeRadicals) {
+      btnFmMergeRadicals.addEventListener('click', () => {
+        fmState.boxes = fmMergeNearbyRadicals(fmState.boxes, 52, 54);
+        fmPushHistory();
+        fmRenderCanvas();
+      });
+    }
+
     document.getElementById('btnFmAutoLabelRows').addEventListener('click', fmAutoLabelByRows);
+    const btnFmAutoLabelSeq = document.getElementById('btnFmAutoLabelSeq');
+    if (btnFmAutoLabelSeq) {
+      btnFmAutoLabelSeq.addEventListener('click', fmAutoLabelSequential);
+    }
     document.getElementById('btnFmExportFont').addEventListener('click', fmExportCustomFont);
 
     document.getElementById('btnCloseNotice').addEventListener('click', () => document.getElementById('dialogNotice').close());
@@ -3616,20 +4054,25 @@ Practice makes perfect: ABCDEFGHIJKLMNOPQRSTUVWXYZ & abcdefghijklmnopqrstuvwxyz 
       openManualInputModal();
     } else if (demo && demo.startsWith('fontmaker')) {
       showFontMakerView();
-      if (demo !== 'fontmaker0') {
+      if (demo.includes('cn')) {
+        fmSwitchPresetMode('chinese');
+      } else if (demo.includes('en')) {
+        fmSwitchPresetMode('english');
+      }
+      if (!demo.endsWith('0')) {
         const im = new Image();
         await new Promise((r) => {
           im.onload = r;
-          im.src = window.DEFAULT_HANDWRITE_DATA.sampleSheet;
+          im.src = fmGenerateSampleHandwritingPhoto(fmState.mode);
         });
         fmLoadImageAndStartStep1(im);
-        if (demo === 'fontmaker2') {
+        if (demo.endsWith('2')) {
           fmSetStep(2);
-        } else if (demo === 'fontmaker3') {
+        } else if (demo.endsWith('3')) {
           fmSetStep(2);
           document.getElementById('dialogNotice').close();
           fmSetStep(3);
-          fmAutoLabelByRows();
+          fmAutoLabelSequential();
         }
       }
     }
