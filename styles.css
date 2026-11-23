@@ -598,6 +598,15 @@ dialog::backdrop {
   align-items: center;
   gap: 10px;
   margin-bottom: 12px;
+  min-width: 0;
+}
+
+.control-row .page-select {
+  min-width: 0;
+  max-width: 100%;
+  flex-shrink: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 .control-row:last-child {

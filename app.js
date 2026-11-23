@@ -415,6 +415,7 @@
       fillMode: 'random', // 'random' | 'manual' | 'article' | 'pdf_ocr'
       ocrPaperStyle: 'inplace', // 'inplace' | 'a4_ruled' | 'a4_blank' | 'a4_scratch' | 'a4_grid'
       ocrConvertScope: 'all', // 'all' | 'answers'
+      ocrSketchStyle: 'full_sketch', // 'full_sketch' | 'sketch_no_line' | 'preserve_gfx'
       ocrPageBlocks: {}, // { [pageNum]: [...] } user-editable OCR blocks per page
       ocrExtraLines: {}, // { [pageNum]: [...] } appended extra handwritten lines per page
       visionPreset: false,
@@ -1070,6 +1071,10 @@ Practice makes perfect: ABCDEFGHIJKLMNOPQRSTUVWXYZ & abcdefghijklmnopqrstuvwxyz 
     if (ocrScopeSel) {
       ocrScopeSel.value = state.config.ocrConvertScope || 'all';
     }
+    const ocrSketchSel = document.getElementById('ocrSketchStyleSelect');
+    if (ocrSketchSel) {
+      ocrSketchSel.value = state.config.ocrSketchStyle || 'full_sketch';
+    }
     const ocrTxt = document.getElementById('ocrPageTextarea');
     const ocrHint = document.getElementById('ocrLineCountHint');
     if (mode === 'pdf_ocr') {
@@ -1283,6 +1288,63 @@ Practice makes perfect: ABCDEFGHIJKLMNOPQRSTUVWXYZ & abcdefghijklmnopqrstuvwxyz 
     ctx.restore();
   }
 
+  function parseHexRgb(hex) {
+    const clean = String(hex || '#161616').replace('#', '').trim();
+    if (clean.length === 3) {
+      return [
+        parseInt(clean[0] + clean[0], 16) || 22,
+        parseInt(clean[1] + clean[1], 16) || 22,
+        parseInt(clean[2] + clean[2], 16) || 22
+      ];
+    }
+    const n = parseInt(clean.padEnd(6, '0').slice(0, 6), 16);
+    if (Number.isNaN(n)) return [22, 22, 22];
+    return [(n >> 16) & 255, (n >> 8) & 255, n & 255];
+  }
+
+  function drawHandDrawnUnderline(ctx, x0, yBase, x1, rng, inkColor) {
+    if (!(x1 - x0 >= 4)) return;
+    const steps = Math.max(4, Math.min(28, Math.round((x1 - x0) / 10)));
+    const pts = [];
+    const slantY = (rng() - 0.5) * 2.2;
+    const archY = (rng() - 0.4) * 2.4;
+    for (let i = 0; i <= steps; i++) {
+      const t = i / steps;
+      const x = x0 + (x1 - x0) * t + (rng() - 0.5) * 0.7;
+      const arch = Math.sin(t * Math.PI) * archY;
+      const wave = Math.sin(t * Math.PI * (2.2 + rng() * 0.8) + rng()) * 0.75;
+      const y = yBase + slantY * (t - 0.5) + arch + wave;
+      pts.push([x, y]);
+    }
+
+    ctx.save();
+    ctx.lineCap = 'round';
+    ctx.lineJoin = 'round';
+    ctx.strokeStyle = inkColor || '#161616';
+    ctx.lineWidth = 1.6 + rng() * 0.45;
+    ctx.globalAlpha = 0.86;
+    ctx.beginPath();
+    ctx.moveTo(pts[0][0], pts[0][1]);
+    for (let i = 1; i < pts.length - 1; i++) {
+      const mx = (pts[i][0] + pts[i + 1][0]) / 2;
+      const my = (pts[i][1] + pts[i + 1][1]) / 2;
+      ctx.quadraticCurveTo(pts[i][0], pts[i][1], mx, my);
+    }
+    ctx.lineTo(pts[pts.length - 1][0], pts[pts.length - 1][1]);
+    ctx.stroke();
+
+    // Subtle second gel-pen nib ink-pressure pass
+    ctx.lineWidth = 1.05;
+    ctx.globalAlpha = 0.35;
+    ctx.beginPath();
+    ctx.moveTo(pts[0][0] + 0.3, pts[0][1] + 0.55);
+    for (let i = 1; i < pts.length; i++) {
+      ctx.lineTo(pts[i][0] + 0.25, pts[i][1] + 0.45);
+    }
+    ctx.stroke();
+    ctx.restore();
+  }
+
   function drawCharactersSequence(ctx, font, text, rowHeightPx, rng, hitCtx) {
     const cfg = state.config;
     const inkColor = cfg.inkColor || '#161616';
@@ -1409,7 +1471,19 @@ Practice makes perfect: ABCDEFGHIJKLMNOPQRSTUVWXYZ & abcdefghijklmnopqrstuvwxyz 
         : -totalAdvance / 2 + cfg.cellPad * PX_PER_CM * 0.5;
     let cellMinX = Infinity, cellMinY = Infinity, cellMaxX = -Infinity, cellMaxY = -Infinity;
 
+    const underlineRanges = hitCtx && Array.isArray(hitCtx.underlineRanges) ? hitCtx.underlineRanges : null;
+    const rangeSpans = underlineRanges ? underlineRanges.map(() => ({ minX: Infinity, maxX: -Infinity })) : null;
+
     for (const item of pickedItems) {
+      if (rangeSpans) {
+        for (let ri = 0; ri < underlineRanges.length; ri++) {
+          const [sIdx, eIdx] = underlineRanges[ri];
+          if (item.charIdx >= sIdx && item.charIdx < eIdx) {
+            if (cursorX < rangeSpans[ri].minX) rangeSpans[ri].minX = cursorX;
+            if (cursorX + item.advance > rangeSpans[ri].maxX) rangeSpans[ri].maxX = cursorX + item.advance;
+          }
+        }
+      }
       if (item.isSpace) {
         cursorX += item.advance;
         continue;
@@ -1469,6 +1543,14 @@ Practice makes perfect: ABCDEFGHIJKLMNOPQRSTUVWXYZ & abcdefghijklmnopqrstuvwxyz 
       }
 
       cursorX += item.advance;
+    }
+
+    if (rangeSpans) {
+      for (const sp of rangeSpans) {
+        if (sp.maxX > sp.minX + 4) {
+          drawHandDrawnUnderline(ctx, sp.minX - 2, baseDigitHeight * 0.64, sp.maxX + 2, rng, inkColor);
+        }
+      }
     }
 
     if (hitCtx && hitCtx.collect && cellMinX < Infinity) {
@@ -1876,11 +1958,75 @@ Practice makes perfect: ABCDEFGHIJKLMNOPQRSTUVWXYZ & abcdefghijklmnopqrstuvwxyz 
     });
   }
 
+  function stripUnderscoresForRanges(rawText) {
+    const str = String(rawText || '');
+    if (!str.includes('_')) {
+      return { cleanText: str, ranges: [], rawToClean: null };
+    }
+    const chars = Array.from(str);
+    const out = [];
+    const rawToClean = new Array(chars.length).fill(-1);
+    const ranges = [];
+    const isSpaceChar = (c) => /\s/.test(c);
+    let i = 0;
+    while (i < chars.length) {
+      if (chars[i] === '_') {
+        let j = i;
+        while (j < chars.length && chars[j] === '_') j++;
+        // Check if followed by short non-space content closing with another run of underscores (like "_2_" or "___25__")
+        let k = j;
+        while (k < chars.length && chars[k] !== '_' && !/[，。；：、？！]/.test(chars[k]) && k - j <= 10) {
+          k++;
+        }
+        if (k > j && k < chars.length && chars[k] === '_') {
+          let m = k;
+          while (m < chars.length && chars[m] === '_') m++;
+          let innerStart = j;
+          let innerEnd = k;
+          while (innerStart < innerEnd && isSpaceChar(chars[innerStart])) innerStart++;
+          while (innerEnd > innerStart && isSpaceChar(chars[innerEnd - 1])) innerEnd--;
+          const startPos = out.length;
+          if (innerEnd > innerStart) {
+            if (out.length > 0 && !isSpaceChar(out[out.length - 1])) out.push(' ');
+            const uStart = out.length;
+            for (let t = innerStart; t < innerEnd; t++) {
+              rawToClean[t] = out.length;
+              out.push(chars[t]);
+            }
+            const uEnd = out.length;
+            ranges.push([uStart, uEnd]);
+            if (m < chars.length && !/^[，。；：、？！\s]/.test(chars[m])) out.push(' ');
+          } else {
+            out.push(' ', ' ');
+            ranges.push([startPos, startPos + 2]);
+          }
+          i = m;
+          continue;
+        }
+        // Single or trailing underscore run
+        const len = j - i;
+        if (len >= 2) {
+          const uStart = out.length;
+          out.push(' ', ' ');
+          ranges.push([uStart, uStart + 2]);
+        } else if (out.length > 0 && !isSpaceChar(out[out.length - 1])) {
+          out.push(' ');
+        }
+        i = j;
+      } else {
+        rawToClean[i] = out.length;
+        out.push(chars[i]);
+        i++;
+      }
+    }
+    return { cleanText: out.join(''), ranges, rawToClean };
+  }
+
   function joinOcrLinesForReflow(rawText) {
     const lines = String(rawText || '').replace(/\r\n/g, '\n').split('\n');
     const paras = [];
     for (const rawLine of lines) {
-      const ln = rawLine.trim();
+      let ln = stripUnderscoresForRanges(rawLine).cleanText.replace(/\s+/g, ' ').trim();
       if (!ln) {
         paras.push('');
         continue;
@@ -1903,11 +2049,311 @@ Practice makes perfect: ABCDEFGHIJKLMNOPQRSTUVWXYZ & abcdefghijklmnopqrstuvwxyz 
     return paras.join('\n');
   }
 
+  function hasUpperGlyphOrGraphic(srcData, imgW, imgH, x0, x1, yTop, hPx) {
+    const sx0 = Math.max(0, Math.floor(x0));
+    const sx1 = Math.min(imgW - 1, Math.ceil(x1));
+    const sy0 = Math.max(0, Math.floor(yTop + 1));
+    const sy1 = Math.min(imgH - 1, Math.floor(yTop + hPx * 0.78));
+    if (sx1 <= sx0 || sy1 <= sy0) return false;
+    let dark = 0;
+    for (let y = sy0; y <= sy1; y++) {
+      for (let x = sx0; x <= sx1; x++) {
+        const idx = (y * imgW + x) * 4;
+        const lum = 0.299 * srcData[idx] + 0.587 * srcData[idx + 1] + 0.114 * srcData[idx + 2];
+        if (lum < 205) {
+          dark++;
+          if (dark >= 6) return true;
+        }
+      }
+    }
+    return false;
+  }
+
+  function detectUnderlineIntervalsPx(srcData, imgW, imgH, x0, x1, yTop, hPx) {
+    const sx0 = Math.max(0, Math.floor(x0));
+    const sx1 = Math.min(imgW - 1, Math.ceil(x1));
+    // Word printed underlines sit cleanly beneath glyph bodies (yTop + hPx*0.985 .. yTop + hPx + 6)
+    const sy0 = Math.max(0, Math.floor(yTop + hPx * 0.985));
+    const sy1 = Math.min(imgH - 1, Math.ceil(yTop + hPx + 6));
+    if (sx1 <= sx0 || sy1 <= sy0) return [];
+
+    const isDarkPx = (x, y) => {
+      if (y < 0 || y >= imgH || x < 0 || x >= imgW) return false;
+      const idx = (y * imgW + x) * 4;
+      return 0.299 * srcData[idx] + 0.587 * srcData[idx + 1] + 0.114 * srcData[idx + 2] < 210;
+    };
+
+    const rawRuns = [];
+    for (let y = sy0; y <= sy1; y++) {
+      let inRun = false;
+      let runStart = 0;
+      let gap = 0;
+      const pushIfDetachedRule = (s, e) => {
+        const len = e - s + 1;
+        if (len < 28) return;
+        // Require a clear horizontal breathing gap just above the underline (either y-1 or y-2, since underlines can be 2px tall with 1px gap below CJK glyphs)
+        let clear2 = 0;
+        let clear1 = 0;
+        for (let x = s; x <= e; x++) {
+          if (!isDarkPx(x, y - 2)) clear2++;
+          if (!isDarkPx(x, y - 1)) clear1++;
+        }
+        if (Math.max(clear1, clear2) / len >= 0.72) {
+          rawRuns.push([s, e]);
+        }
+      };
+
+      for (let x = sx0; x <= sx1; x++) {
+        const d = isDarkPx(x, y) || (y + 1 <= sy1 && isDarkPx(x, y + 1));
+        if (d) {
+          if (!inRun) {
+            inRun = true;
+            runStart = x;
+          }
+          gap = 0;
+        } else if (inRun) {
+          gap++;
+          if (gap > 2) {
+            pushIfDetachedRule(runStart, x - gap);
+            inRun = false;
+          }
+        }
+      }
+      if (inRun) {
+        pushIfDetachedRule(runStart, sx1 - gap);
+      }
+    }
+
+    if (!rawRuns.length) return [];
+    rawRuns.sort((a, b) => a[0] - b[0]);
+    const intervals = [];
+    for (const [s, e] of rawRuns) {
+      const last = intervals[intervals.length - 1];
+      if (last && s <= last[1] + 4) {
+        last[1] = Math.max(last[1], e);
+      } else {
+        intervals.push([s, e]);
+      }
+    }
+    return intervals;
+  }
+
+  function findTrailingUnderlineEnd(srcData, imgW, imgH, startX, limitX, yTop, hPx) {
+    const sx0 = Math.max(0, Math.floor(startX));
+    const sx1 = Math.min(imgW - 1, Math.floor(limitX));
+    if (sx1 <= sx0) return startX;
+    const upperY0 = Math.max(0, Math.floor(yTop));
+    const upperY1 = Math.min(imgH - 1, Math.floor(yTop + hPx * 0.78));
+    const botY0 = Math.max(0, Math.floor(yTop + hPx * 0.90));
+    const botY1 = Math.min(imgH - 1, Math.ceil(yTop + hPx + 6));
+    let lastLineX = startX;
+    let miss = 0;
+
+    for (let x = sx0; x <= sx1; x++) {
+      let upperDark = false;
+      for (let y = upperY0; y <= upperY1; y++) {
+        const idx = (y * imgW + x) * 4;
+        if (0.299 * srcData[idx] + 0.587 * srcData[idx + 1] + 0.114 * srcData[idx + 2] < 205) {
+          upperDark = true;
+          break;
+        }
+      }
+      if (upperDark) break;
+      let botDark = false;
+      for (let y = botY0; y <= botY1; y++) {
+        const idx = (y * imgW + x) * 4;
+        if (0.299 * srcData[idx] + 0.587 * srcData[idx + 1] + 0.114 * srcData[idx + 2] < 210) {
+          botDark = true;
+          break;
+        }
+      }
+      if (botDark) {
+        lastLineX = x;
+        miss = 0;
+      } else {
+        miss++;
+        if (miss > 8 && lastLineX > startX) break;
+        if (miss > 24) break;
+      }
+    }
+    return lastLineX;
+  }
+
+  function mapUnderlineIntervalsToCharRanges(origSegs, underlineIntervals, rawToClean = null) {
+    if (!underlineIntervals || !underlineIntervals.length) return [];
+    const rawRanges = [];
+    let offset = 0;
+    for (let sIdx = 0; sIdx < origSegs.length; sIdx++) {
+      const sub = origSegs[sIdx];
+      if (sIdx > 0) offset++; // account for single joining space inserted between merged segs
+      const chars = Array.from(sub.text || '');
+      const weights = chars.map((ch) =>
+        ch.trim() === '' ? 0.35 : /[\u3000-\u9fff\uff00-\uffef]/.test(ch) ? 1.0 : 0.56
+      );
+      const totalW = weights.reduce((a, b) => a + b, 0) || 1;
+      const sx = sub.xCm * PX_PER_CM;
+      const sw = Math.max(4, sub.wCm * PX_PER_CM);
+
+      let curW = 0;
+      let activeStart = -1;
+      for (let ci = 0; ci < chars.length; ci++) {
+        const cx0 = sx + (curW / totalW) * sw;
+        const cx1 = sx + ((curW + weights[ci]) / totalW) * sw;
+        const charW = Math.max(1, cx1 - cx0);
+        curW += weights[ci];
+        const ch = chars[ci];
+        const isTrimBreak = !ch.trim();
+        let covered = false;
+        if (!isTrimBreak) {
+          for (const [ux0, ux1] of underlineIntervals) {
+            const overlap = Math.min(cx1, ux1) - Math.max(cx0, ux0);
+            if (overlap >= charW * 0.52) {
+              covered = true;
+              break;
+            }
+          }
+        }
+        if (covered) {
+          if (activeStart < 0) activeStart = offset + ci;
+        } else if (activeStart >= 0) {
+          if (!isTrimBreak) {
+            rawRanges.push([activeStart, offset + ci]);
+            activeStart = -1;
+          }
+        }
+      }
+      if (activeStart >= 0) {
+        rawRanges.push([activeStart, offset + chars.length]);
+      }
+      offset += chars.length;
+    }
+    if (!rawToClean) return rawRanges;
+    const mapped = [];
+    for (const [rs, re] of rawRanges) {
+      let cMin = Infinity;
+      let cMax = -1;
+      for (let r = rs; r < re; r++) {
+        const ci = rawToClean[r];
+        if (ci !== undefined && ci >= 0) {
+          if (ci < cMin) cMin = ci;
+          if (ci + 1 > cMax) cMax = ci + 1;
+        }
+      }
+      if (cMax > cMin) mapped.push([cMin, cMax]);
+    }
+    return mapped;
+  }
+
+  // Transform clean non-text PDF graphics (circuit wires, shapes, equation symbols) into freehand pen sketch ink
+  function sketchifyGraphicsCanvas(gfxCanvas, targetCtx, inkColor, seed) {
+    const w = gfxCanvas.width;
+    const h = gfxCanvas.height;
+    const gCtx = gfxCanvas.getContext('2d');
+    const src = gCtx.getImageData(0, 0, w, h).data;
+    const outImg = targetCtx.createImageData(w, h);
+    const dst = outImg.data;
+    const [ir, ig, ib] = parseHexRgb(inkColor);
+
+    // 1. Pre-compute ink alpha & mark active rows containing graphics so whitespace skips fast
+    const inkMask = new Float32Array(w * h);
+    const rowActive = new Uint8Array(h);
+    for (let y = 0; y < h; y++) {
+      let rowHasInk = false;
+      const rowBase = y * w;
+      for (let x = 0; x < w; x++) {
+        const idx4 = (rowBase + x) * 4;
+        const lum = 0.299 * src[idx4] + 0.587 * src[idx4 + 1] + 0.114 * src[idx4 + 2];
+        if (lum < 238) {
+          const alpha = Math.min(1.0, (242 - lum) / 145);
+          inkMask[rowBase + x] = alpha;
+          if (alpha > 0.06) rowHasInk = true;
+        }
+      }
+      if (rowHasInk) {
+        for (let dy = -4; dy <= 4; dy++) {
+          const yy = y + dy;
+          if (yy >= 0 && yy < h) rowActive[yy] = 1;
+        }
+      }
+    }
+
+    // Seeded harmonic phases for smooth continuous freehand tremor
+    const p1 = (seed % 997) * 0.017;
+    const p2 = ((seed >> 3) % 991) * 0.023;
+    const p3 = ((seed >> 6) % 983) * 0.019;
+    const p4 = ((seed >> 9) % 977) * 0.029;
+    const p5 = ((seed >> 11) % 971) * 0.031;
+
+    const sampleBilinear = (fx, fy) => {
+      const ix = Math.floor(fx);
+      const iy = Math.floor(fy);
+      if (ix < 0 || iy < 0 || ix >= w - 1 || iy >= h - 1) return 0;
+      const tx = fx - ix;
+      const ty = fy - iy;
+      const idx = iy * w + ix;
+      const a00 = inkMask[idx];
+      const a10 = inkMask[idx + 1];
+      const a01 = inkMask[idx + w];
+      const a11 = inkMask[idx + w + 1];
+      return (a00 * (1 - tx) + a10 * tx) * (1 - ty) + (a01 * (1 - tx) + a11 * tx) * ty;
+    };
+
+    // 2. Render pure white paper + smooth hand-warped pen strokes with organic nib pressure
+    for (let y = 0; y < h; y++) {
+      const rowBase = y * w;
+      if (!rowActive[y]) {
+        for (let x = 0; x < w; x++) {
+          const d4 = (rowBase + x) * 4;
+          dst[d4] = 255;
+          dst[d4 + 1] = 255;
+          dst[d4 + 2] = 255;
+          dst[d4 + 3] = 255;
+        }
+        continue;
+      }
+      for (let x = 0; x < w; x++) {
+        const d4 = (rowBase + x) * 4;
+        const dx =
+          1.45 * Math.sin(0.052 * x + 0.029 * y + p1) +
+          0.72 * Math.sin(0.118 * x - 0.084 * y + p2) +
+          0.32 * Math.sin(0.24 * y + p3);
+        const dy =
+          1.35 * Math.cos(0.049 * y + 0.033 * x + p4) +
+          0.70 * Math.sin(0.106 * y - 0.079 * x + p5) +
+          0.32 * Math.cos(0.22 * x + p1);
+
+        const sx = x - dx;
+        const sy = y - dy;
+        const vCenter = sampleBilinear(sx, sy);
+        // Subtle gel-pen nib broadening + hand over-stroke texture
+        const vNib = Math.max(vCenter, 0.56 * sampleBilinear(sx - 0.72, sy - 0.52), 0.42 * sampleBilinear(sx + 0.62, sy + 0.48));
+
+        if (vNib > 0.03) {
+          const pressure = 0.84 + 0.16 * Math.sin(0.13 * x - 0.09 * y + p2);
+          const inkA = Math.min(1.0, vNib * pressure * 1.12);
+          dst[d4] = Math.round(255 * (1 - inkA) + ir * inkA);
+          dst[d4 + 1] = Math.round(255 * (1 - inkA) + ig * inkA);
+          dst[d4 + 2] = Math.round(255 * (1 - inkA) + ib * inkA);
+          dst[d4 + 3] = 255;
+        } else {
+          dst[d4] = 255;
+          dst[d4 + 1] = 255;
+          dst[d4 + 2] = 255;
+          dst[d4 + 3] = 255;
+        }
+      }
+    }
+
+    targetCtx.putImageData(outImg, 0, 0);
+  }
+
   function renderPdfOcrPage(pageIndex1Based, targetCanvas, seedOffset = 0) {
     const pageObj = state.pages[pageIndex1Based - 1];
     if (!pageObj) return;
     const cfg = state.config;
     const paperStyle = cfg.ocrPaperStyle || 'inplace';
+    const sketchStyle = cfg.ocrSketchStyle || 'full_sketch';
+    const inkColor = cfg.inkColor || '#161616';
     const collectHits = seedOffset === 0 && pageIndex1Based === state.currentPage;
     if (collectHits) {
       state.hitBoxes = { chars: [], cells: [], rows: [] };
@@ -2011,7 +2457,7 @@ Practice makes perfect: ABCDEFGHIJKLMNOPQRSTUVWXYZ & abcdefghijklmnopqrstuvwxyz 
       return;
     }
 
-    // ---- 'inplace' mode: Preserve original A4 page layout & diagrams, erase printed text, draw editable handwriting ----
+    // ---- 'inplace' mode: Full Zero-Print Hand-Drawn Sketch + Handwritten Diagram Labels + Clean Underlines ----
     const w = pageObj.width;
     const h = pageObj.height;
     targetCanvas.width = w;
@@ -2019,57 +2465,168 @@ Practice makes perfect: ABCDEFGHIJKLMNOPQRSTUVWXYZ & abcdefghijklmnopqrstuvwxyz 
     const ctx = targetCanvas.getContext('2d');
     ctx.clearRect(0, 0, w, h);
 
-    if (pageObj.img) {
-      ctx.drawImage(pageObj.img, 0, 0, w, h);
-    } else {
-      ctx.fillStyle = '#ffffff';
-      ctx.fillRect(0, 0, w, h);
-    }
-
     const font = fontsRegistry[activeFontIndex];
-    if (!font) return;
-
     const blocks = getOcrBlocksForPage(pageIndex1Based);
     const activeIndices = getActiveOcrIndices(pageIndex1Based);
     const extraLines = getOcrExtraLinesForPage(pageIndex1Based);
+    const scope = cfg.ocrConvertScope || 'all';
+    const useSketch = sketchStyle !== 'preserve_gfx' && scope === 'all';
+    const wantHandUnderlines = sketchStyle === 'full_sketch';
+
+    // Prepare graphics buffer (either offscreen for sketchifying, or direct canvas for preserve_gfx)
+    const gfxCanvas = useSketch ? document.createElement('canvas') : targetCanvas;
+    if (useSketch) {
+      gfxCanvas.width = w;
+      gfxCanvas.height = h;
+    }
+    const gctx = gfxCanvas.getContext('2d');
+    if (pageObj.img) {
+      gctx.drawImage(pageObj.img, 0, 0, w, h);
+    } else {
+      gctx.fillStyle = '#ffffff';
+      gctx.fillRect(0, 0, w, h);
+    }
+
+    if (!font) {
+      if (useSketch) ctx.drawImage(gfxCanvas, 0, 0);
+      return;
+    }
+
+    const srcImageData = gctx.getImageData(0, 0, w, h).data;
     const globalShiftX = (pg.startX - 1.8) * PX_PER_CM;
     const globalShiftY = (pg.startY - 1.8) * PX_PER_CM;
     const sizeMul = Math.max(0.55, Math.min(1.85, (cfg.rowHeight || 0.85) / 0.85));
 
-    // PASS 1: Cleanly white-out / paper-fill original printed text spans while leaving circuit diagrams intact
+    // Pre-compute merged gap-free segments + underline spans for every active block BEFORE erasing pixels
+    const preparedByBlockIdx = {};
     for (const blockIdx of activeIndices) {
       const b = blocks[blockIdx];
       const isEdited = b.origText !== undefined && b.text !== b.origText;
-      const paperColor = sampleBrightPaperFill(ctx, b.xCm * PX_PER_CM - 3, b.yCm * PX_PER_CM - 3);
-      ctx.fillStyle = paperColor;
+      const paperColor = useSketch
+        ? '#ffffff'
+        : sampleBrightPaperFill(gctx, b.xCm * PX_PER_CM - 3, b.yCm * PX_PER_CM - 3);
 
+      let rightLimitPx = w - 28;
+      for (const d of blocks) {
+        if (!d.isDiagram) continue;
+        if (d.yCm < b.yCm + b.hCm + 0.08 && d.yCm + d.hCm + 0.08 > b.yCm && d.xCm > b.xCm + 0.4) {
+          rightLimitPx = Math.min(rightLimitPx, d.xCm * PX_PER_CM - 6);
+        }
+      }
+
+      const bXPx = b.xCm * PX_PER_CM;
+      const bYPx = b.yCm * PX_PER_CM;
+      const bWPx = b.wCm * PX_PER_CM;
+      const bHPx = b.hCm * PX_PER_CM;
+
+      // Detect printed Word underline intervals on original pixels before erasing
+      const trailingEndX = sketchStyle !== 'preserve_gfx'
+        ? findTrailingUnderlineEnd(srcImageData, w, h, bXPx + bWPx, Math.min(rightLimitPx, bXPx + bWPx + 165), bYPx, bHPx)
+        : bXPx + bWPx;
+      const scanEndX = Math.max(bXPx + bWPx + 4, trailingEndX + 4);
+      const underlineIntervals = sketchStyle !== 'preserve_gfx'
+        ? detectUnderlineIntervalsPx(srcImageData, w, h, bXPx - 2, scanEndX, bYPx, bHPx)
+        : [];
+
+      let mergedSegs = [];
       if (!isEdited && b.segs && b.segs.length > 0) {
-        for (const seg of b.segs) {
-          const ex = seg.xCm * PX_PER_CM - 2.5;
-          const ey = seg.yCm * PX_PER_CM - 2.5;
-          const ew = seg.wCm * PX_PER_CM + 7;
-          const eh = seg.hCm * PX_PER_CM + 5.5;
-          ctx.fillRect(ex, ey, ew, eh);
+        if (sketchStyle !== 'preserve_gfx') {
+          // Merge consecutive segments when gap ONLY contains whitespace / underline (preserve real graphic gaps like "|Z|")
+          let group = [b.segs[0]];
+          for (let sIdx = 1; sIdx < b.segs.length; sIdx++) {
+            const prevSub = group[group.length - 1];
+            const nextSub = b.segs[sIdx];
+            const gapX0 = (prevSub.xCm + prevSub.wCm) * PX_PER_CM + 2;
+            const gapX1 = nextSub.xCm * PX_PER_CM - 2;
+            const hasGraphic = gapX1 > gapX0 + 3 && hasUpperGlyphOrGraphic(srcImageData, w, h, gapX0, gapX1, bYPx, bHPx);
+            if (hasGraphic) {
+              mergedSegs.push(group);
+              group = [nextSub];
+            } else {
+              group.push(nextSub);
+            }
+          }
+          mergedSegs.push(group);
+        } else {
+          mergedSegs = b.segs.map((s) => [s]);
+        }
+      }
+
+      preparedByBlockIdx[blockIdx] = {
+        paperColor,
+        rightLimitPx,
+        trailingEndX,
+        underlineIntervals,
+        mergedSegs
+      };
+    }
+
+    // PASS 1: Erase printed text blocks (plus printed underlines & diagram labels when useSketch is active)
+    for (const blockIdx of activeIndices) {
+      const b = blocks[blockIdx];
+      const prep = preparedByBlockIdx[blockIdx];
+      const isEdited = b.origText !== undefined && b.text !== b.origText;
+      gctx.fillStyle = prep.paperColor;
+
+      if (!isEdited && prep.mergedSegs.length > 0) {
+        for (const group of prep.mergedSegs) {
+          const first = group[0];
+          const last = group[group.length - 1];
+          const ex = first.xCm * PX_PER_CM - 2.5;
+          const ey = Math.min(...group.map((g) => g.yCm)) * PX_PER_CM - 2.5;
+          const endX = (last.xCm + last.wCm) * PX_PER_CM + 7;
+          const eh = Math.max(...group.map((g) => g.hCm)) * PX_PER_CM + (sketchStyle !== 'preserve_gfx' ? 8 : 5.5);
+          gctx.fillRect(ex, ey, Math.max(8, endX - ex), eh);
+        }
+        // Also cleanly erase trailing underline outside the last text segment (e.g., Q2 floating underline)
+        if (sketchStyle !== 'preserve_gfx' && prep.trailingEndX > (b.xCm + b.wCm) * PX_PER_CM + 2) {
+          const uex = (b.xCm + b.wCm) * PX_PER_CM - 2;
+          const uey = b.yCm * PX_PER_CM + b.hCm * PX_PER_CM * 0.80;
+          gctx.fillRect(uex, uey, prep.trailingEndX - uex + 6, b.hCm * PX_PER_CM * 0.25 + 8);
         }
       } else {
         const ex = b.xCm * PX_PER_CM - 2.5;
         const ey = b.yCm * PX_PER_CM - 2.5;
         let maxEraseW = Math.max(b.wCm, (b.text || '').length * (b.hCm || 0.42) * 0.68) * PX_PER_CM + 8;
-        // Guard against erasing diagrams to the right on the same vertical band
+        if (sketchStyle !== 'preserve_gfx') {
+          maxEraseW = Math.max(maxEraseW, prep.trailingEndX - ex + 6);
+        }
         for (const d of blocks) {
           if (!d.isDiagram) continue;
           if (d.yCm < b.yCm + b.hCm && d.yCm + d.hCm > b.yCm && d.xCm > b.xCm + 0.4) {
             maxEraseW = Math.min(maxEraseW, d.xCm * PX_PER_CM - ex - 4);
           }
         }
-        ctx.fillRect(ex, ey, Math.max(12, maxEraseW), b.hCm * PX_PER_CM + 6);
+        gctx.fillRect(ex, ey, Math.max(12, maxEraseW), b.hCm * PX_PER_CM + 8);
       }
     }
 
-    // PASS 2: Render editable handwritten strokes on top & register draggable/dbl-clickable hitboxes
+    // Tightly erase extracted [D] diagram text labels in full-sketch mode so they can be replaced with real handwriting
+    const diagBlocks = [];
+    if (useSketch) {
+      gctx.fillStyle = '#ffffff';
+      blocks.forEach((d, dIdx) => {
+        if (!d.isDiagram || !d.text || !d.text.trim()) return;
+        diagBlocks.push({ d, dIdx });
+        const segs = d.segs && d.segs.length > 0 ? d.segs : [d];
+        for (const seg of segs) {
+          const ex = seg.xCm * PX_PER_CM - 1.5;
+          const ey = seg.yCm * PX_PER_CM - 1.5;
+          const ew = Math.max(6, seg.wCm * PX_PER_CM + 3);
+          const eh = Math.max(10, seg.hCm * PX_PER_CM + 3.5);
+          gctx.fillRect(ex, ey, ew, eh);
+        }
+      });
+
+      // PASS 2: Transform all remaining printed circuit wires/diagrams/equations into genuine freehand pen sketch!
+      sketchifyGraphicsCanvas(gfxCanvas, ctx, inkColor, state.globalSeed + pageIndex1Based * 131 + seedOffset * 977);
+    }
+
+    // PASS 3: Render editable handwritten strokes + continuous hand-drawn underlines on top
     let lastEndYCm = 2.6;
     for (const blockIdx of activeIndices) {
       const b = blocks[blockIdx];
+      const prep = preparedByBlockIdx[blockIdx];
       lastEndYCm = Math.max(lastEndYCm, b.yCm + b.hCm);
       const txt = b.text;
       if (!txt || !txt.trim()) continue;
@@ -2081,38 +2638,60 @@ Practice makes perfect: ABCDEFGHIJKLMNOPQRSTUVWXYZ & abcdefghijklmnopqrstuvwxyz 
       const rdx = (rowOff.dx || 0) * PX_PER_CM;
       const rdy = (rowOff.dy || 0) * PX_PER_CM;
 
-      let rightLimitPx = w - 28;
-      for (const d of blocks) {
-        if (!d.isDiagram) continue;
-        if (d.yCm < b.yCm + b.hCm + 0.08 && d.yCm + d.hCm + 0.08 > b.yCm && d.xCm > b.xCm + 0.4) {
-          rightLimitPx = Math.min(rightLimitPx, d.xCm * PX_PER_CM - 6);
-        }
-      }
-
-      if (!isEdited && b.segs && b.segs.length > 0) {
-        for (let segIdx = 0; segIdx < b.segs.length; segIdx++) {
-          const seg = b.segs[segIdx];
-          const colNum = segIdx + 1;
+      if (!isEdited && prep.mergedSegs.length > 0) {
+        let prevDrawnEndX = -Infinity;
+        for (let gIdx = 0; gIdx < prep.mergedSegs.length; gIdx++) {
+          const group = prep.mergedSegs[gIdx];
+          const first = group[0];
+          const colNum = gIdx + 1;
           const cellKey = `${pageIndex1Based}-${rowNum}-${colNum}`;
           const cellOff = (cfg.cellOffsets && cfg.cellOffsets[cellKey]) || { dx: 0, dy: 0 };
-          const originX = seg.xCm * PX_PER_CM + globalShiftX + rdx + (cellOff.dx || 0) * PX_PER_CM;
-          const originY = seg.yCm * PX_PER_CM + seg.hCm * PX_PER_CM * 0.50 + globalShiftY + rdy + (cellOff.dy || 0) * PX_PER_CM;
-          const effRowH = Math.max(22, Math.min(72, seg.hCm * PX_PER_CM * 1.72 * sizeMul));
-          const nextSeg = b.segs[segIdx + 1];
-          const segMaxW = nextSeg
-            ? Math.max(seg.wCm * PX_PER_CM * 1.02, (nextSeg.xCm - seg.xCm) * PX_PER_CM - 4)
-            : Math.max(seg.wCm * PX_PER_CM * 1.12, rightLimitPx - seg.xCm * PX_PER_CM);
-          const rng = mulberry32(state.globalSeed + seedOffset * 100003 + pageIndex1Based * 10007 + rowNum * 313 + colNum * 37);
 
+          let originX = first.xCm * PX_PER_CM + globalShiftX + rdx + (cellOff.dx || 0) * PX_PER_CM;
+          if (gIdx === 0 && sketchStyle !== 'preserve_gfx') {
+            // Preserve leading indent neatly
+          } else if (originX < prevDrawnEndX + 10) {
+            originX = prevDrawnEndX + 10;
+          }
+          const originY = first.yCm * PX_PER_CM + first.hCm * PX_PER_CM * 0.50 + globalShiftY + rdy + (cellOff.dy || 0) * PX_PER_CM;
+          const effRowH = Math.max(22, Math.min(72, Math.max(...group.map((g) => g.hCm)) * PX_PER_CM * 1.72 * sizeMul));
+
+          const nextGroup = prep.mergedSegs[gIdx + 1];
+          const segMaxW = nextGroup
+            ? Math.max(30, nextGroup[0].xCm * PX_PER_CM - first.xCm * PX_PER_CM - 6)
+            : Math.max(30, prep.rightLimitPx - first.xCm * PX_PER_CM);
+
+          const rawJoined = group.map((g) => g.text).join(' ');
+          let drawStr = rawJoined;
+          let uRanges = [];
+          if (sketchStyle !== 'preserve_gfx') {
+            const stripped = stripUnderscoresForRanges(rawJoined);
+            drawStr = stripped.cleanText;
+            if (wantHandUnderlines) {
+              const pxRanges = mapUnderlineIntervalsToCharRanges(group, prep.underlineIntervals, stripped.rawToClean);
+              const combined = stripped.ranges.concat(pxRanges).sort((a, b) => a[0] - b[0]);
+              for (const rg of combined) {
+                const last = uRanges[uRanges.length - 1];
+                if (last && rg[0] <= last[1]) {
+                  last[1] = Math.max(last[1], rg[1]);
+                } else {
+                  uRanges.push([rg[0], rg[1]]);
+                }
+              }
+            }
+          }
+
+          const rng = mulberry32(state.globalSeed + seedOffset * 100003 + pageIndex1Based * 10007 + rowNum * 313 + colNum * 37);
           ctx.save();
           ctx.translate(originX, originY);
           const cellRotDeg = randRange(rng, cfg.cellRandom.rotate) * 0.45;
           if (cellRotDeg) ctx.rotate((cellRotDeg * Math.PI) / 180);
-          drawCharactersSequence(ctx, font, seg.text, effRowH, rng, {
+          drawCharactersSequence(ctx, font, drawStr, effRowH, rng, {
             collect: collectHits,
             startAtZero: true,
             alignLeft: true,
             maxWidth: Math.max(24, segMaxW),
+            underlineRanges: uRanges,
             originX,
             originY,
             cellScale: 1,
@@ -2122,6 +2701,9 @@ Practice makes perfect: ABCDEFGHIJKLMNOPQRSTUVWXYZ & abcdefghijklmnopqrstuvwxyz 
             blockIdx
           });
           ctx.restore();
+
+          const lastG = group[group.length - 1];
+          prevDrawnEndX = (lastG.xCm + lastG.wCm) * PX_PER_CM;
         }
       } else {
         const cellKey = `${pageIndex1Based}-${rowNum}-1`;
@@ -2129,18 +2711,27 @@ Practice makes perfect: ABCDEFGHIJKLMNOPQRSTUVWXYZ & abcdefghijklmnopqrstuvwxyz 
         const originX = b.xCm * PX_PER_CM + globalShiftX + rdx + (cellOff.dx || 0) * PX_PER_CM;
         const originY = b.yCm * PX_PER_CM + b.hCm * PX_PER_CM * 0.50 + globalShiftY + rdy + (cellOff.dy || 0) * PX_PER_CM;
         const effRowH = Math.max(22, Math.min(72, b.hCm * PX_PER_CM * 1.72 * sizeMul));
-        const lineMaxW = Math.max(b.wCm * PX_PER_CM * 1.08, rightLimitPx - b.xCm * PX_PER_CM);
-        const rng = mulberry32(state.globalSeed + seedOffset * 100003 + pageIndex1Based * 10007 + rowNum * 313 + 37);
+        const lineMaxW = Math.max(b.wCm * PX_PER_CM * 1.08, prep.rightLimitPx - b.xCm * PX_PER_CM);
 
+        let drawStr = txt;
+        let uRanges = [];
+        if (sketchStyle !== 'preserve_gfx') {
+          const stripped = stripUnderscoresForRanges(txt);
+          drawStr = stripped.cleanText;
+          if (wantHandUnderlines) uRanges = stripped.ranges;
+        }
+
+        const rng = mulberry32(state.globalSeed + seedOffset * 100003 + pageIndex1Based * 10007 + rowNum * 313 + 37);
         ctx.save();
         ctx.translate(originX, originY);
         const cellRotDeg = randRange(rng, cfg.cellRandom.rotate) * 0.45;
         if (cellRotDeg) ctx.rotate((cellRotDeg * Math.PI) / 180);
-        drawCharactersSequence(ctx, font, txt, effRowH, rng, {
+        drawCharactersSequence(ctx, font, drawStr, effRowH, rng, {
           collect: collectHits,
           startAtZero: true,
           alignLeft: true,
           maxWidth: Math.max(24, lineMaxW),
+          underlineRanges: uRanges,
           originX,
           originY,
           cellScale: 1,
@@ -2163,6 +2754,42 @@ Practice makes perfect: ABCDEFGHIJKLMNOPQRSTUVWXYZ & abcdefghijklmnopqrstuvwxyz 
           y: b.yCm * PX_PER_CM + globalShiftY + rdy,
           w: Math.max(28, b.wCm * PX_PER_CM),
           h: Math.max(20, b.hCm * PX_PER_CM)
+        });
+      }
+    }
+
+    // PASS 4: Draw extracted [D] diagram labels (e.g. "2Ω", "3Ω", "10V", "图 1", "图 2") in real handwriting!
+    if (useSketch && diagBlocks.length > 0) {
+      for (const { d, dIdx } of diagBlocks) {
+        const segs = d.segs && d.segs.length > 0 ? d.segs : [d];
+        const rowNum = dIdx + 1;
+        segs.forEach((seg, sIdx) => {
+          const colNum = sIdx + 1;
+          const cellKey = `${pageIndex1Based}-d${rowNum}-${colNum}`;
+          const cellOff = (cfg.cellOffsets && cfg.cellOffsets[cellKey]) || { dx: 0, dy: 0 };
+          const originX = seg.xCm * PX_PER_CM + globalShiftX + (cellOff.dx || 0) * PX_PER_CM;
+          const originY = seg.yCm * PX_PER_CM + seg.hCm * PX_PER_CM * 0.50 + globalShiftY + (cellOff.dy || 0) * PX_PER_CM;
+          const effRowH = Math.max(19, Math.min(48, seg.hCm * PX_PER_CM * 1.75 * sizeMul));
+          const rng = mulberry32(state.globalSeed + seedOffset * 100003 + pageIndex1Based * 10007 + rowNum * 509 + colNum * 41);
+
+          ctx.save();
+          ctx.translate(originX, originY);
+          const cellRotDeg = randRange(rng, cfg.cellRandom.rotate) * 0.45;
+          if (cellRotDeg) ctx.rotate((cellRotDeg * Math.PI) / 180);
+          drawCharactersSequence(ctx, font, seg.text, effRowH, rng, {
+            collect: collectHits,
+            startAtZero: true,
+            alignLeft: true,
+            maxWidth: Math.max(24, seg.wCm * PX_PER_CM * 1.35),
+            originX,
+            originY,
+            cellScale: 1,
+            page: pageIndex1Based,
+            r: `d${rowNum}`,
+            c: colNum,
+            blockIdx: dIdx
+          });
+          ctx.restore();
         });
       }
     }
@@ -2648,6 +3275,7 @@ Practice makes perfect: ABCDEFGHIJKLMNOPQRSTUVWXYZ & abcdefghijklmnopqrstuvwxyz 
       state.config.fillMode = 'pdf_ocr';
       state.config.ocrPaperStyle = state.config.ocrPaperStyle || 'inplace';
       state.config.ocrConvertScope = state.config.ocrConvertScope || 'all';
+      state.config.ocrSketchStyle = state.config.ocrSketchStyle || 'full_sketch';
       state.config.startX = 1.8;
       state.config.startY = 1.8;
       state.config.rowHeight = 0.85;
@@ -4142,6 +4770,16 @@ Practice makes perfect: ABCDEFGHIJKLMNOPQRSTUVWXYZ & abcdefghijklmnopqrstuvwxyz 
         renderCurrentPage();
       });
     }
+    const ocrSketchStyleSelect = document.getElementById('ocrSketchStyleSelect');
+    if (ocrSketchStyleSelect) {
+      ocrSketchStyleSelect.addEventListener('change', (e) => {
+        state.config.fillMode = 'pdf_ocr';
+        state.config.ocrSketchStyle = e.target.value || 'full_sketch';
+        pushHistory();
+        syncAllControlsFromState();
+        renderCurrentPage();
+      });
+    }
     const ocrPageTextarea = document.getElementById('ocrPageTextarea');
     if (ocrPageTextarea) {
       ocrPageTextarea.addEventListener('input', (e) => {
@@ -4983,6 +5621,9 @@ Practice makes perfect: ABCDEFGHIJKLMNOPQRSTUVWXYZ & abcdefghijklmnopqrstuvwxyz 
       }
       if (params.get('ocrScope')) {
         state.config.ocrConvertScope = params.get('ocrScope');
+      }
+      if (params.get('ocrSketch')) {
+        state.config.ocrSketchStyle = params.get('ocrSketch');
       }
       if (params.get('ink')) {
         state.config.inkColor = params.get('ink');

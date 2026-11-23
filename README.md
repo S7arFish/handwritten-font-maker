@@ -37,7 +37,10 @@
 ## 🆕 上传 PDF 自动识字转可编辑 A4 手写体（含 9 个多页示例）
 
 - **🔍 PDF 全自动识字转 A4 手写**：点击首页 **「🔍 上传 PDF 自动识字转 A4 手写」** 或左侧 **「🔍 识字转A4」** 面板上传任意带文字的 PDF（试卷、习题集、作业、论文或讲义），浏览器本地即可自动完成全页文字识别、公式/希腊字母解码（`Ω, ω, τ, θ, π, ∠, ≥, ×` 等）与图文分离：
-  - **🎯 原卷 A4 原位转手写**：自动擦除印刷体文字的同时**完整保留原卷电路图、几何插图与标尺**，原地替换为逼真的手写体。
+  - **🎯 原卷 A4 原位转手写 + ✍️ 全手绘零打印感**：自动擦除印刷体文字的同时，支持三种渲染档位切换：
+    - **✍️ 全手绘零打印（默认）**：自动将原卷电路图/矢量符号/位图插图实时手绘化（自然笔锋微抖 + 墨水色重着色）、将图内标号（如 `2Ω / 10V / 图 1`）替换为真实手写体，并将填空留白与印刷/字符下划线合成为连贯的手绘钢笔下划线，消除一切计算机打印痕迹；
+    - **🧼 纯净手写笔迹**：手绘电路图与图内手写的同时自动去除填空横线，适合整理纯手写笔记；
+    - **🖨️ 仅文字手写**：保留原卷原始印刷电路图与下划线，仅将题目/作答文字转为手写。
   - **5 种 A4 纸张样式切换**：支持 **原卷 A4 原位转手写**、**A4 大学作业横线纸**（自动合并断行段落、文字稳落横线）、**纯白 A4 纸**、**A4 护眼微黄演算纸** 与 **A4 红格方格稿纸 20×26**。
   - **双模式转换范围**：支持 **整页全文转手写** 或 **仅解答与答案转手写（保留原卷印刷题干）**。
   - **所见即所得双向可编辑**：既可在左侧逐页文本框实时增删改字，也可直接在 A4 画布上 **双击任意行直接改字**，并结合 **单字 / 单格 / 整行** 自由拖拽微调。
@@ -60,17 +63,19 @@
 | 示例6 | 英语横线作文纸（竖版 · 2页） | 英文作文流式手写 |
 | 示例7 | 空白演算草稿纸（竖版 · 2页） | 数学 / 物理公式 + 中英推导 |
 | 示例8 | 中英双语读书笔记纸（竖版 · 2页） | 英文单词 + 中文释义 + 英文例句 |
-| **示例9** | **《电路理论》作业 PDF 识字转手写（竖版 A4 · 14页）** | **自动识别 14 页共 341 行 + 保留电路图 · 5 种 A4 纸自由重排** |
+| **示例9** | **《电路理论》作业 PDF 识字转手写（竖版 A4 · 14页）** | **自动识别 14 页共 341 行 + 电路图与下划线全手绘 · 5 种 A4 纸自由重排** |
 
-| 首页 9 个示例 | 示例9：PDF 原位擦除印刷字转手写（保留电路图） |
+| 首页 9 个示例 | 示例9：全手绘零打印（第1页电路图+手写标注） |
 | :---: | :---: |
-| <img src="./docs/images/home-preview.png" alt="首页9个示例与上传PDF识字入口" /> | <img src="./docs/images/example9-circuit-inplace.png" alt="电路理论PDF原位转手写" /> |
-| **示例9：一键重排为 A4 大学作业横线纸** | **示例5：中文方格作文纸 20×20** |
-| <img src="./docs/images/example9-circuit-a4ruled.png" alt="电路理论转A4横线纸" /> | <img src="./docs/images/example5-chinese-essay.png" alt="中文方格作文纸" /> |
-| **示例6：英语横线作文纸（蓝黑墨水）** | **示例7：空白演算草稿纸** |
-| <img src="./docs/images/example6-english-essay.png" alt="英语横线作文纸" /> | <img src="./docs/images/example7-scratch-paper.png" alt="空白演算草稿纸" /> |
-| **示例3：中英数混排成绩评定表** | **示例8：中英双语读书笔记** |
-| <img src="./docs/images/example3-course-eval.png" alt="成绩评定表" /> | <img src="./docs/images/example8-bilingual-notes.png" alt="中英双语笔记" /> |
+| <img src="./docs/images/home-preview.png" alt="首页9个示例与上传PDF识字入口" /> | <img src="./docs/images/example9-circuit-inplace.png" alt="电路理论PDF全手绘转手写第1页" /> |
+| **示例9：第2页填空手绘下划线与多路电路图手绘化** | **示例9：一键重排为 A4 大学作业横线纸** |
+| <img src="./docs/images/example9-circuit-sketch-p2.png" alt="电路理论PDF第2页手绘下划线与手绘电路图" /> | <img src="./docs/images/example9-circuit-a4ruled.png" alt="电路理论转A4横线纸" /> |
+| **示例5：中文方格作文纸 20×20** | **示例6：英语横线作文纸（蓝黑墨水）** |
+| <img src="./docs/images/example5-chinese-essay.png" alt="中文方格作文纸" /> | <img src="./docs/images/example6-english-essay.png" alt="英语横线作文纸" /> |
+| **示例7：空白演算草稿纸** | **示例3：中英数混排成绩评定表** |
+| <img src="./docs/images/example7-scratch-paper.png" alt="空白演算草稿纸" /> | <img src="./docs/images/example3-course-eval.png" alt="成绩评定表" /> |
+| **示例8：中英双语读书笔记** | **示例4：实验室温湿度巡检表** |
+| <img src="./docs/images/example8-bilingual-notes.png" alt="中英双语笔记" /> | <img src="./docs/images/example4-lab-inspection.png" alt="实验室巡检表" /> |
 
 > 汉字和英文的手写效果依赖系统已有的手写类字体，例如 macOS 自带的 *翩翩体 HanziPen SC、手札体 Hannotate SC、行楷 Xingkai SC、凌慧体 LingWai SC、娃娃体 Wawati SC、楷体 Kaiti SC、Bradley Hand、Noteworthy*。缺少某个字体时会按顺序回退到下一个可用字体。
 

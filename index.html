@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>手写体生成器 · 汉字 / 英语字母 / 数字填表与稿纸生成工具</title>
-  <link rel="stylesheet" href="styles.css?v=13">
+  <link rel="stylesheet" href="styles.css?v=14">
 </head>
 <body>
   <div class="app-shell">
@@ -258,6 +258,14 @@
                 <select id="ocrConvertScopeSelect" class="page-select" style="flex:1;height:28px;">
                   <option value="all">🔄 整页全文全部转手写 (题目+答案全手写)</option>
                   <option value="answers">✍️ 仅解答与答案转手写 (保留原卷印刷题干)</option>
+                </select>
+              </div>
+              <div class="control-row" style="margin-bottom:8px;" id="ocrSketchRow">
+                <label class="row-label" for="ocrSketchStyleSelect" style="width:66px;">全手绘感</label>
+                <select id="ocrSketchStyleSelect" class="page-select" style="flex:1;height:28px;">
+                  <option value="full_sketch">✍️ 全手绘零打印 (手绘电路+下划线+图字)</option>
+                  <option value="sketch_no_line">🧼 纯净手写笔迹 (手绘电路+去填空下划线)</option>
+                  <option value="preserve_gfx">🖨️ 仅文字手写 (保留原卷印刷图与下划线)</option>
                 </select>
               </div>
               <div style="display:flex;align-items:center;justify-content:space-between;gap:5px;flex-wrap:wrap;margin-bottom:6px;">
@@ -652,11 +660,11 @@
   </dialog>
 
   <!-- Local Bundled Assets & Libraries -->
-  <script src="vendor/pdf.worker.min.js?v=13"></script>
-  <script src="vendor/pdf.min.js?v=13"></script>
-  <script src="vendor/jspdf.umd.min.js?v=13"></script>
-  <script src="assets/default-font.js?v=13"></script>
-  <script src="assets/examples-data.js?v=13"></script>
-  <script src="app.js?v=13"></script>
+  <script src="vendor/pdf.worker.min.js?v=14"></script>
+  <script src="vendor/pdf.min.js?v=14"></script>
+  <script src="vendor/jspdf.umd.min.js?v=14"></script>
+  <script src="assets/default-font.js?v=14"></script>
+  <script src="assets/examples-data.js?v=14"></script>
+  <script src="app.js?v=14"></script>
 </body>
 </html>
