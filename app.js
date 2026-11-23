@@ -412,7 +412,11 @@
       cellOffsets: {}, // per-cell custom { dx, dy } offset in px
       charOffsets: {}, // per-character custom { dx, dy } offset in px
       pageConfigs: {}, // per-page overrides for startX, startY, rows
-      fillMode: 'random', // 'random' | 'manual'
+      fillMode: 'random', // 'random' | 'manual' | 'article' | 'pdf_ocr'
+      ocrPaperStyle: 'inplace', // 'inplace' | 'a4_ruled' | 'a4_blank' | 'a4_scratch' | 'a4_grid'
+      ocrConvertScope: 'all', // 'all' | 'answers'
+      ocrPageBlocks: {}, // { [pageNum]: [...] } user-editable OCR blocks per page
+      ocrExtraLines: {}, // { [pageNum]: [...] } appended extra handwritten lines per page
       visionPreset: false,
       digitSlots: [
         { type: 'digit', digits: [3] },
@@ -1034,16 +1038,20 @@ Practice makes perfect: ABCDEFGHIJKLMNOPQRSTUVWXYZ & abcdefghijklmnopqrstuvwxyz 
     const tabRandom = document.getElementById('tabFillRandom');
     const tabManual = document.getElementById('tabFillManual');
     const tabArticle = document.getElementById('tabFillArticle');
+    const tabOcr = document.getElementById('tabFillOcr');
     if (tabRandom) tabRandom.classList.toggle('active', mode === 'random');
     if (tabManual) tabManual.classList.toggle('active', mode === 'manual');
     if (tabArticle) tabArticle.classList.toggle('active', mode === 'article');
+    if (tabOcr) tabOcr.classList.toggle('active', mode === 'pdf_ocr');
 
     const pRandom = document.getElementById('panelFillRandom');
     const pManual = document.getElementById('panelFillManual');
     const pArticle = document.getElementById('panelFillArticle');
+    const pOcr = document.getElementById('panelFillOcr');
     if (pRandom) pRandom.hidden = mode !== 'random';
     if (pManual) pManual.hidden = mode !== 'manual';
     if (pArticle) pArticle.hidden = mode !== 'article';
+    if (pOcr) pOcr.hidden = mode !== 'pdf_ocr';
 
     const layoutSel = document.getElementById('articleLayoutSelect');
     if (layoutSel && state.config.articleLayout) {
@@ -1053,6 +1061,30 @@ Practice makes perfect: ABCDEFGHIJKLMNOPQRSTUVWXYZ & abcdefghijklmnopqrstuvwxyz 
     if (artTxt && state.config.articleText !== undefined && document.activeElement !== artTxt) {
       artTxt.value = state.config.articleText;
     }
+
+    const ocrStyleSel = document.getElementById('ocrPaperStyleSelect');
+    if (ocrStyleSel) {
+      ocrStyleSel.value = state.config.ocrPaperStyle || 'inplace';
+    }
+    const ocrScopeSel = document.getElementById('ocrConvertScopeSelect');
+    if (ocrScopeSel) {
+      ocrScopeSel.value = state.config.ocrConvertScope || 'all';
+    }
+    const ocrTxt = document.getElementById('ocrPageTextarea');
+    const ocrHint = document.getElementById('ocrLineCountHint');
+    if (mode === 'pdf_ocr') {
+      const activeIndices = getActiveOcrIndices(state.currentPage);
+      const totalRecognized = getOcrBlocksForPage(state.currentPage).filter((b) => !b.isDiagram).length;
+      if (ocrHint) {
+        ocrHint.textContent = `第 ${state.currentPage} 页已识别 ${totalRecognized} 行（当前转换 ${activeIndices.length} 行，支持修改与画布双击编辑）：`;
+      }
+      if (ocrTxt && document.activeElement !== ocrTxt) {
+        ocrTxt.value = getActiveOcrTextForPage(state.currentPage);
+      }
+    } else if (ocrHint) {
+      ocrHint.textContent = '本页已识别可编辑手写文本：';
+    }
+
     const inkSel = document.getElementById('inkColorSelect');
     if (inkSel) {
       inkSel.value = state.config.inkColor || '#161616';
@@ -1255,8 +1287,12 @@ Practice makes perfect: ABCDEFGHIJKLMNOPQRSTUVWXYZ & abcdefghijklmnopqrstuvwxyz 
     const cfg = state.config;
     const inkColor = cfg.inkColor || '#161616';
     const chars = Array.from(text);
-    const isGridEssay = cfg.fillMode === 'article' && cfg.articleLayout === 'grid';
-    const isLinesEssay = cfg.fillMode === 'article' && cfg.articleLayout === 'lines';
+    const isGridEssay =
+      (cfg.fillMode === 'article' && cfg.articleLayout === 'grid') ||
+      (cfg.fillMode === 'pdf_ocr' && cfg.ocrPaperStyle === 'a4_grid');
+    const isLinesEssay =
+      (cfg.fillMode === 'article' && cfg.articleLayout === 'lines') ||
+      (cfg.fillMode === 'pdf_ocr' && cfg.ocrPaperStyle !== 'a4_grid');
     const baseDigitHeight = isGridEssay
       ? Math.min(rowHeightPx * 0.44, cfg.colWidth * PX_PER_CM * 0.62)
       : isLinesEssay
@@ -1365,9 +1401,12 @@ Practice makes perfect: ABCDEFGHIJKLMNOPQRSTUVWXYZ & abcdefghijklmnopqrstuvwxyz 
       totalAdvance *= fit;
     }
 
-    let cursorX = alignLeft
-      ? cfg.cellPad * PX_PER_CM * 0.5
-      : -totalAdvance / 2 + cfg.cellPad * PX_PER_CM * 0.5;
+    let cursorX =
+      hitCtx && hitCtx.startAtZero
+        ? 0
+        : alignLeft
+        ? cfg.cellPad * PX_PER_CM * 0.5
+        : -totalAdvance / 2 + cfg.cellPad * PX_PER_CM * 0.5;
     let cellMinX = Infinity, cellMinY = Infinity, cellMaxX = -Infinity, cellMaxY = -Infinity;
 
     for (const item of pickedItems) {
@@ -1381,8 +1420,8 @@ Practice makes perfect: ABCDEFGHIJKLMNOPQRSTUVWXYZ & abcdefghijklmnopqrstuvwxyz 
       const userCharOff = (charKey && cfg.charOffsets && cfg.charOffsets[charKey]) || { dx: 0, dy: 0 };
       const scaleInv = hitCtx && hitCtx.cellScale ? 1 / hitCtx.cellScale : 1;
 
-      const cx = cursorX + item.advance / 2 + item.dx + userCharOff.dx * scaleInv;
-      const cy = (item.isDot ? baseDigitHeight * 0.26 + item.dy : item.dy) + userCharOff.dy * scaleInv;
+      const cx = cursorX + item.advance / 2 + item.dx + (userCharOff.dx || 0) * PX_PER_CM * scaleInv;
+      const cy = (item.isDot ? baseDigitHeight * 0.26 + item.dy : item.dy) + (userCharOff.dy || 0) * PX_PER_CM * scaleInv;
 
       ctx.translate(cx, cy);
       if (item.rotDeg) {
@@ -1415,6 +1454,7 @@ Practice makes perfect: ABCDEFGHIJKLMNOPQRSTUVWXYZ & abcdefghijklmnopqrstuvwxyz 
           page: hitCtx.page,
           r: hitCtx.r,
           c: hitCtx.c,
+          blockIdx: hitCtx.blockIdx,
           charIdx: item.charIdx,
           ch: item.ch,
           x: bx,
@@ -1438,6 +1478,7 @@ Practice makes perfect: ABCDEFGHIJKLMNOPQRSTUVWXYZ & abcdefghijklmnopqrstuvwxyz 
         page: hitCtx.page,
         r: hitCtx.r,
         c: hitCtx.c,
+        blockIdx: hitCtx.blockIdx,
         text,
         x: cellMinX - 3,
         y: cellMinY - 3,
@@ -1447,7 +1488,719 @@ Practice makes perfect: ABCDEFGHIJKLMNOPQRSTUVWXYZ & abcdefghijklmnopqrstuvwxyz 
     }
   }
 
+  // =========================================================================
+  // PDF Auto-OCR Text Extraction -> Editable A4 Handwriting Engine
+  // =========================================================================
+  const OCR_PUA_MAP = {
+    0xf057: 'Ω', 0xf077: 'ω', 0xf074: 'τ', 0xf071: 'θ', 0xf070: 'π',
+    0xf06a: 'φ', 0xf065: 'ε', 0xf06f: '°', 0xf0b0: '°', 0xf0b4: '×',
+    0xf0d7: '·', 0xf0b3: '≥', 0xf0a3: '≤', 0xf0a5: '∞', 0xf0d0: '∠',
+    0xf0de: '⇒', 0xf0e1: '<', 0xf026: '', 0xf0e6: '(', 0xf0e7: '|',
+    0xf0e8: '(', 0xf0f6: ')', 0xf0f7: '|', 0xf0f8: ')'
+  };
+
+  function cleanPdfOcrStr(str) {
+    let out = '';
+    for (const ch of String(str || '')) {
+      const cp = ch.codePointAt(0);
+      if (OCR_PUA_MAP[cp] !== undefined) out += OCR_PUA_MAP[cp];
+      else if (cp >= 0xE000 && cp <= 0xF8FF) out += '';
+      else out += ch;
+    }
+    return out;
+  }
+
+  function isLikelyDiagramLabel(b, inAnswerBlock) {
+    const t = (b.text || '').trim();
+    if (!t) return true;
+    if (/^图\s*[0-9一二三四五六七八九十解]+/.test(t)) return true;
+    if (/^[\(（]\s*[ab1-9]\s*[\)）]$/.test(t)) return true;
+    if (/^[＋+－\-]$/.test(t) || /^[＋+－\-]\s+[＋+－\-]$/.test(t)) return true;
+    if (/^([＋+－\-]\s+)?t\s*=\s*0$/i.test(t)) return true;
+    if (/^……[（）\(\)]+$/.test(t)) return false;
+    if (/[=、。；：，？！]/.test(t)) return false;
+    if (/^[\u4e00-\u9fff]+$/.test(t) && t.length >= 2) return false;
+    if (inAnswerBlock && !/[ΩVAFH]/.test(t) && !/^(\d+\s*|\d+[iIuU])$/.test(t)) {
+      if (/[+\-\u2212*/]/.test(t)) return false;
+    }
+    const tokens = t.split(/\s+/);
+    const allShortDiagramTokens = tokens.every(
+      (tok) => tok.length <= 8 && !/[\u4e00-\u9fff]{2,}/.test(tok)
+    );
+    if (b.h <= 10.6 && allShortDiagramTokens && (b.x > 125 || (tokens.length === 1 && t.length <= 4))) {
+      return true;
+    }
+    if (b.x > 340 && b.w < 130 && allShortDiagramTokens && !/[（）\(\)]/.test(t)) return true;
+    if (
+      b.h <= 11.2 &&
+      tokens.length >= 2 &&
+      tokens.every((tok) => /^(\d+(\.\d+)?[ΩVAFH]|uc\(0[－\-]\)|[+\-＋－abcS]|[RLCiu]\d*)$/i.test(tok))
+    ) {
+      return true;
+    }
+    return false;
+  }
+
+  function startsAnswerLine(t) {
+    return /^(答|解|证明)[：:]/.test(t);
+  }
+  function isQuestionHeaderLine(t) {
+    return /^[一二三四五六七八九十]+、/.test(t) || /^\d+\s*[、.]/.test(t) || /^《.*》/.test(t);
+  }
+  function isInlineAnswerLine(t) {
+    if (/^[\(（][1-9][\)）]/.test(t)) return true;
+    if (/^(KCL|KVL|P[123S]?|I[1234L]?|U[12abocOC]?|R[0eq]?|Z[12]?|K[12]|i[L]?\(t\)|u[c]?\(t\))\s*=/.test(t)) return true;
+    if (/\(\s*[A-D√×]\s*\)|（\s*[A-D√×]\s*）/.test(t)) return true;
+    return false;
+  }
+
+  function extractOcrBlocksFromTextContent(tc, vp1, carryState = { inAnswerBlock: false }) {
+    const PT_TO_CM = 2.54 / 72;
+    const rawItems = [];
+    for (const it of tc.items || []) {
+      const txt = cleanPdfOcrStr(it.str || '');
+      if (!txt) continue;
+      const x = it.transform[4];
+      const fontH = Math.max(8, Math.hypot(it.transform[2], it.transform[3]) || it.height || 12);
+      const yBaseline = vp1.height - it.transform[5];
+      const yTop = yBaseline - fontH * 0.85;
+      const estW = Array.from(txt).reduce(
+        (s, c) => s + (/[\u3000-\u9fff\uff00-\uffef]/.test(c) ? fontH : fontH * 0.56),
+        0
+      );
+      const w = Math.max(fontH * 0.35, it.width || 0, estW * 0.92);
+      rawItems.push({ x, y: yTop, yBase: yBaseline, w, h: fontH, text: txt });
+    }
+
+    rawItems.sort((a, b) => (Math.abs(a.yBase - b.yBase) > 7.5 ? a.yBase - b.yBase : a.x - b.x));
+    const rowGroups = [];
+    for (const it of rawItems) {
+      let best = null;
+      for (let i = rowGroups.length - 1; i >= Math.max(0, rowGroups.length - 4); i--) {
+        if (Math.abs(rowGroups[i].yBase - it.yBase) <= 7.5) {
+          best = rowGroups[i];
+          break;
+        }
+      }
+      if (!best) rowGroups.push({ yBase: it.yBase, items: [it] });
+      else best.items.push(it);
+    }
+
+    const blocks = [];
+    for (const rg of rowGroups) {
+      rg.items.sort((a, b) => a.x - b.x);
+      let cur = null;
+      const pushCur = () => {
+        if (!cur || !cur.text.trim()) return;
+        const cleanText = cur.text.replace(/\s+/g, ' ').replace(/Ω\s*Ω/g, 'Ω').trim();
+        const segs = cur.segs
+          .map((s) => ({ ...s, text: s.text.replace(/\s+/g, ' ').replace(/Ω\s*Ω/g, 'Ω').trim() }))
+          .filter((s) => s.text.length > 0);
+        blocks.push({
+          x: cur.x,
+          y: cur.y,
+          w: cur.endX - cur.x,
+          h: cur.h,
+          text: cleanText,
+          segs
+        });
+      };
+
+      for (const it of rg.items) {
+        const hasVisible = it.text.trim().length > 0;
+        const segItem = hasVisible ? { x: it.x, y: it.y, w: it.w, h: it.h, text: it.text } : null;
+        if (!cur) {
+          cur = {
+            x: it.x,
+            y: it.y,
+            endX: it.x + it.w,
+            h: it.h,
+            text: it.text,
+            segs: segItem ? [segItem] : []
+          };
+        } else {
+          const gap = it.x - cur.endX;
+          if (gap > 48) {
+            pushCur();
+            cur = {
+              x: it.x,
+              y: it.y,
+              endX: it.x + it.w,
+              h: it.h,
+              text: it.text,
+              segs: segItem ? [segItem] : []
+            };
+          } else {
+            if (gap > 6 && !cur.text.endsWith(' ') && !it.text.startsWith(' ')) cur.text += ' ';
+            cur.text += it.text;
+            cur.endX = Math.max(cur.endX, it.x + it.w);
+            cur.h = Math.max(cur.h, it.h);
+            cur.y = Math.min(cur.y, it.y);
+            if (segItem) {
+              const last = cur.segs[cur.segs.length - 1];
+              const segGap = last ? segItem.x - (last.x + last.w) : 999;
+              if (last && segGap <= 9.5) {
+                if (segGap > 3 && !last.text.endsWith(' ') && !segItem.text.startsWith(' ')) last.text += ' ';
+                last.text += segItem.text;
+                const nx1 = Math.max(last.x + last.w, segItem.x + segItem.w);
+                last.y = Math.min(last.y, segItem.y);
+                last.w = nx1 - last.x;
+                last.h = Math.max(last.h, segItem.h);
+              } else {
+                cur.segs.push(segItem);
+              }
+            }
+          }
+        }
+      }
+      pushCur();
+    }
+
+    return blocks.map((b) => {
+      if (isQuestionHeaderLine(b.text)) carryState.inAnswerBlock = false;
+      else if (startsAnswerLine(b.text)) carryState.inAnswerBlock = true;
+      const isDiag = isLikelyDiagramLabel(b, carryState.inAnswerBlock);
+      const isAns = !isDiag && (carryState.inAnswerBlock || isInlineAnswerLine(b.text));
+      return {
+        xCm: Number((b.x * PT_TO_CM).toFixed(2)),
+        yCm: Number((b.y * PT_TO_CM).toFixed(2)),
+        wCm: Number((b.w * PT_TO_CM).toFixed(2)),
+        hCm: Number((b.h * PT_TO_CM).toFixed(2)),
+        text: b.text,
+        origText: b.text,
+        isDiagram: isDiag,
+        isAnswer: isAns,
+        segs: b.segs.map((s) => ({
+          xCm: Number((s.x * PT_TO_CM).toFixed(2)),
+          yCm: Number((s.y * PT_TO_CM).toFixed(2)),
+          wCm: Number((s.w * PT_TO_CM).toFixed(2)),
+          hCm: Number((s.h * PT_TO_CM).toFixed(2)),
+          text: s.text
+        }))
+      };
+    });
+  }
+
+  function getOcrBlocksForPage(pageNum = state.currentPage) {
+    if (!state.config.ocrPageBlocks) state.config.ocrPageBlocks = {};
+    const key = String(pageNum);
+    if (!state.config.ocrPageBlocks[key]) {
+      const pageObj = state.pages[pageNum - 1];
+      const base = (pageObj && pageObj.ocrBlocks) || [];
+      state.config.ocrPageBlocks[key] = deepClone(base);
+    }
+    return state.config.ocrPageBlocks[key];
+  }
+
+  function getActiveOcrIndices(pageNum = state.currentPage) {
+    const blocks = getOcrBlocksForPage(pageNum);
+    const scope = state.config.ocrConvertScope || 'all';
+    const out = [];
+    blocks.forEach((b, idx) => {
+      if (b.isDiagram) return;
+      if (scope === 'answers' && !b.isAnswer) return;
+      out.push(idx);
+    });
+    return out;
+  }
+
+  function getOcrExtraLinesForPage(pageNum = state.currentPage) {
+    if (!state.config.ocrExtraLines) state.config.ocrExtraLines = {};
+    const arr = state.config.ocrExtraLines[String(pageNum)];
+    return Array.isArray(arr) ? arr : [];
+  }
+
+  function getActiveOcrTextForPage(pageNum = state.currentPage) {
+    const blocks = getOcrBlocksForPage(pageNum);
+    const activeIndices = getActiveOcrIndices(pageNum);
+    const lines = activeIndices.map((idx) => blocks[idx].text || '');
+    const extra = getOcrExtraLinesForPage(pageNum);
+    return lines.concat(extra).join('\n');
+  }
+
+  function applyOcrTextToPage(pageNum, rawText) {
+    const blocks = getOcrBlocksForPage(pageNum);
+    const activeIndices = getActiveOcrIndices(pageNum);
+    const splitLines = String(rawText || '').replace(/\r\n/g, '\n').split('\n');
+    for (let i = 0; i < activeIndices.length; i++) {
+      const b = blocks[activeIndices[i]];
+      if (i < splitLines.length) {
+        b.text = splitLines[i];
+      } else {
+        b.text = '';
+      }
+    }
+    if (!state.config.ocrExtraLines) state.config.ocrExtraLines = {};
+    if (splitLines.length > activeIndices.length) {
+      state.config.ocrExtraLines[String(pageNum)] = splitLines.slice(activeIndices.length);
+    } else {
+      state.config.ocrExtraLines[String(pageNum)] = [];
+    }
+  }
+
+  function resetCurrentPageOcrText(pageNum = state.currentPage) {
+    const pageObj = state.pages[pageNum - 1];
+    if (!pageObj) return;
+    if (!state.config.ocrPageBlocks) state.config.ocrPageBlocks = {};
+    if (!state.config.ocrExtraLines) state.config.ocrExtraLines = {};
+    state.config.ocrPageBlocks[String(pageNum)] = deepClone(pageObj.ocrBlocks || []);
+    state.config.ocrExtraLines[String(pageNum)] = [];
+    syncAllControlsFromState();
+    pushHistory();
+    renderCurrentPage();
+  }
+
+  function sampleBrightPaperFill(ctx, px, py) {
+    try {
+      const sx = Math.max(0, Math.min(ctx.canvas.width - 1, Math.round(px)));
+      const sy = Math.max(0, Math.min(ctx.canvas.height - 1, Math.round(py)));
+      const d = ctx.getImageData(sx, sy, 1, 1).data;
+      if (d[0] > 215 && d[1] > 215 && d[2] > 205) {
+        return `rgb(${d[0]}, ${d[1]}, ${d[2]})`;
+      }
+    } catch (e) {}
+    return '#ffffff';
+  }
+
+  function drawA4PaperSheetBackground(ctx, w, h, paperStyle, pageIndex1Based) {
+    if (paperStyle === 'a4_scratch') {
+      ctx.fillStyle = '#faf6ea';
+      ctx.fillRect(0, 0, w, h);
+      // Faint header divider line & subtle paper grain
+      ctx.save();
+      ctx.strokeStyle = '#d9cfba';
+      ctx.lineWidth = 1.5;
+      ctx.beginPath();
+      ctx.moveTo(1.8 * PX_PER_CM, 2.15 * PX_PER_CM);
+      ctx.lineTo(w - 1.8 * PX_PER_CM, 2.15 * PX_PER_CM);
+      ctx.stroke();
+      ctx.fillStyle = '#9b8e75';
+      ctx.font = '14px "PingFang SC", "Microsoft YaHei", sans-serif';
+      ctx.fillText(`A4 演算草稿 / 手写笔记 · 第 ${pageIndex1Based} 页`, 1.8 * PX_PER_CM, 1.85 * PX_PER_CM);
+      ctx.restore();
+      return;
+    }
+
+    // Pure white base for blank, ruled, or grid A4
+    ctx.fillStyle = '#ffffff';
+    ctx.fillRect(0, 0, w, h);
+
+    if (paperStyle === 'a4_ruled') {
+      const leftMargin = 2.1 * PX_PER_CM;
+      const rightMargin = w - 1.8 * PX_PER_CM;
+      const startY = 2.95 * PX_PER_CM;
+      const rowH = 0.90 * PX_PER_CM;
+      const totalLines = Math.floor((h - 1.8 * PX_PER_CM - startY) / rowH);
+
+      ctx.save();
+      // Top double header line + vertical red margin line
+      ctx.strokeStyle = '#e5a3a3';
+      ctx.lineWidth = 1.4;
+      ctx.beginPath();
+      ctx.moveTo(1.75 * PX_PER_CM, 1.8 * PX_PER_CM);
+      ctx.lineTo(1.75 * PX_PER_CM, h - 1.5 * PX_PER_CM);
+      ctx.stroke();
+
+      ctx.strokeStyle = '#3b82f6';
+      ctx.lineWidth = 1.8;
+      ctx.beginPath();
+      ctx.moveTo(1.75 * PX_PER_CM, 2.05 * PX_PER_CM);
+      ctx.lineTo(rightMargin, 2.05 * PX_PER_CM);
+      ctx.stroke();
+
+      ctx.fillStyle = '#64748b';
+      ctx.font = '13px "PingFang SC", "Microsoft YaHei", sans-serif';
+      ctx.fillText(`A4 作业横线纸 · 第 ${pageIndex1Based} 页`, leftMargin, 1.82 * PX_PER_CM);
+
+      ctx.strokeStyle = '#bfdbfe';
+      ctx.lineWidth = 1.1;
+      for (let r = 0; r <= totalLines; r++) {
+        const y = startY + r * rowH;
+        ctx.beginPath();
+        ctx.moveTo(1.75 * PX_PER_CM, y);
+        ctx.lineTo(rightMargin, y);
+        ctx.stroke();
+      }
+      ctx.restore();
+    } else if (paperStyle === 'a4_grid') {
+      const startX = 2.1 * PX_PER_CM;
+      const startY = 2.75 * PX_PER_CM;
+      const colW = 0.84 * PX_PER_CM;
+      const rowH = 0.92 * PX_PER_CM;
+      const cols = 20;
+      const rows = 26;
+      const gridW = cols * colW;
+
+      ctx.save();
+      ctx.strokeStyle = '#dc7676';
+      ctx.lineWidth = 1.6;
+      ctx.strokeRect(startX - 4, startY - 4, gridW + 8, rows * rowH + 8);
+      ctx.fillStyle = '#b91c1c';
+      ctx.font = '14px "PingFang SC", "Microsoft YaHei", sans-serif';
+      ctx.fillText(`A4 稿纸 (20×26 = 520 格) · 第 ${pageIndex1Based} 页`, 10.6 * PX_PER_CM, startY - 14);
+
+      ctx.strokeStyle = '#e89b9b';
+      ctx.lineWidth = 0.9;
+      for (let r = 0; r < rows; r++) {
+        const ry = startY + r * rowH;
+        const innerH = rowH * 0.78;
+        ctx.strokeRect(startX, ry, gridW, innerH);
+        for (let c = 1; c < cols; c++) {
+          const cx = startX + c * colW;
+          ctx.beginPath();
+          ctx.moveTo(cx, ry);
+          ctx.lineTo(cx, ry + innerH);
+          ctx.stroke();
+        }
+      }
+      ctx.restore();
+    }
+  }
+
+  let editingOcrBlockIdx = -1;
+
+  function openOcrLineEditModal(blockIdx) {
+    const blocks = getOcrBlocksForPage(state.currentPage);
+    if (blockIdx < 0 || blockIdx >= blocks.length) return;
+    editingOcrBlockIdx = blockIdx;
+    const b = blocks[blockIdx];
+    const dlg = document.getElementById('dialogEditOcrLine');
+    const inp = document.getElementById('ocrLineModalInput');
+    if (inp) inp.value = b.text || '';
+    if (dlg && !dlg.open) dlg.showModal();
+    requestAnimationFrame(() => {
+      if (inp) {
+        inp.focus();
+        inp.select();
+      }
+    });
+  }
+
+  function joinOcrLinesForReflow(rawText) {
+    const lines = String(rawText || '').replace(/\r\n/g, '\n').split('\n');
+    const paras = [];
+    for (const rawLine of lines) {
+      const ln = rawLine.trim();
+      if (!ln) {
+        paras.push('');
+        continue;
+      }
+      const startsNewPara =
+        /^[一二三四五六七八九十]+、/.test(ln) ||
+        /^\d+\s*[、.]/.test(ln) ||
+        /^(答|解|证明)[：:]/.test(ln) ||
+        /^[A-D][．.）)]/.test(ln) ||
+        /^《.*》$/.test(ln);
+      const prev = paras.length > 0 ? paras[paras.length - 1] : '';
+      const prevEndedCleanly = !prev || /[。！？；：.!?\）)]$/.test(prev) || /^《.*》$/.test(prev);
+      if (paras.length === 0 || startsNewPara || prevEndedCleanly) {
+        paras.push(ln);
+      } else {
+        const needsSpace = /[A-Za-z0-9]$/.test(prev) && /^[A-Za-z0-9]/.test(ln);
+        paras[paras.length - 1] = prev + (needsSpace ? ' ' : '') + ln;
+      }
+    }
+    return paras.join('\n');
+  }
+
+  function renderPdfOcrPage(pageIndex1Based, targetCanvas, seedOffset = 0) {
+    const pageObj = state.pages[pageIndex1Based - 1];
+    if (!pageObj) return;
+    const cfg = state.config;
+    const paperStyle = cfg.ocrPaperStyle || 'inplace';
+    const collectHits = seedOffset === 0 && pageIndex1Based === state.currentPage;
+    if (collectHits) {
+      state.hitBoxes = { chars: [], cells: [], rows: [] };
+    }
+
+    const pg = getPageGridParams(pageIndex1Based);
+
+    if (paperStyle !== 'inplace') {
+      const w = pageObj.height > pageObj.width ? pageObj.width : 1260;
+      const h = pageObj.height > pageObj.width ? pageObj.height : 1782;
+      targetCanvas.width = w;
+      targetCanvas.height = h;
+      const ctx = targetCanvas.getContext('2d');
+      ctx.clearRect(0, 0, w, h);
+      drawA4PaperSheetBackground(ctx, w, h, paperStyle, pageIndex1Based);
+
+      const font = fontsRegistry[activeFontIndex];
+      if (!font) return;
+      const pageText = joinOcrLinesForReflow(getActiveOcrTextForPage(pageIndex1Based));
+      const shiftX = (pg.startX - 1.8) * PX_PER_CM;
+      const shiftY = (pg.startY - 1.8) * PX_PER_CM;
+      const sizeMul = Math.max(0.6, Math.min(1.8, (cfg.rowHeight || 0.85) / 0.85));
+
+      if (paperStyle === 'a4_grid') {
+        const cols = 20;
+        const rows = 26;
+        const startXPx = 2.1 * PX_PER_CM + shiftX;
+        const startYPx = 2.75 * PX_PER_CM + shiftY;
+        const colWidthPx = 0.84 * PX_PER_CM;
+        const rowHeightPx = 0.92 * PX_PER_CM;
+        const gridPages = layoutArticleIntoGrid(pageText, rows, cols);
+        const gridData = gridPages[0] || [];
+        for (let r = 0; r < rows; r++) {
+          const rowKey = `${pageIndex1Based}-${r + 1}`;
+          const rowOff = (cfg.rowOffsets && cfg.rowOffsets[rowKey]) || { dx: 0, dy: 0 };
+          const baseY = startYPx + (r + 0.39) * rowHeightPx + (rowOff.dy || 0) * PX_PER_CM;
+          for (let c = 1; c <= cols; c++) {
+            const ch = gridData[r] && gridData[r][c - 1];
+            if (!ch) continue;
+            const cellKey = `${pageIndex1Based}-${r + 1}-${c}`;
+            const cellOff = (cfg.cellOffsets && cfg.cellOffsets[cellKey]) || { dx: 0, dy: 0 };
+            const cx = startXPx + (c - 0.5) * colWidthPx + (rowOff.dx || 0) * PX_PER_CM + (cellOff.dx || 0) * PX_PER_CM;
+            const cy = baseY + (cellOff.dy || 0) * PX_PER_CM;
+            const rng = mulberry32(state.globalSeed + seedOffset * 100003 + pageIndex1Based * 10007 + (r + 1) * 313 + c * 37);
+            drawHandwrittenString(ctx, ch, cx, cy, colWidthPx, rowHeightPx * sizeMul, rng, false, {
+              collect: collectHits,
+              maxWidth: colWidthPx * 0.92,
+              page: pageIndex1Based,
+              r: r + 1,
+              c
+            });
+          }
+        }
+        return;
+      }
+
+      // Lined / Blank / Scratch A4 flowing layout
+      const startXPx = 2.1 * PX_PER_CM + shiftX;
+      const startYPx = (paperStyle === 'a4_ruled' ? 2.95 : 2.35) * PX_PER_CM + shiftY;
+      const rowHeightPx = 0.90 * PX_PER_CM;
+      const maxLineWidthPx = w - 3.9 * PX_PER_CM;
+      const maxLines = Math.floor((h - 1.6 * PX_PER_CM - startYPx) / rowHeightPx) + 1;
+      const wrapped = layoutArticleIntoLines(pageText, maxLineWidthPx, rowHeightPx * sizeMul);
+
+      for (let r = 0; r < Math.min(maxLines, wrapped.length); r++) {
+        const lineText = wrapped[r];
+        if (!lineText) continue;
+        const rowNum = r + 1;
+        const rowKey = `${pageIndex1Based}-${rowNum}`;
+        const rowOff = (cfg.rowOffsets && cfg.rowOffsets[rowKey]) || { dx: 0, dy: 0 };
+        const cellKey = `${pageIndex1Based}-${rowNum}-1`;
+        const cellOff = (cfg.cellOffsets && cfg.cellOffsets[cellKey]) || { dx: 0, dy: 0 };
+        const baseOffset = paperStyle === 'a4_ruled' ? -0.34 * PX_PER_CM : 0.45 * rowHeightPx;
+        const lineY = startYPx + r * rowHeightPx + baseOffset + (rowOff.dy || 0) * PX_PER_CM + (cellOff.dy || 0) * PX_PER_CM;
+        const lineX = startXPx + (rowOff.dx || 0) * PX_PER_CM + (cellOff.dx || 0) * PX_PER_CM;
+        const rng = mulberry32(state.globalSeed + seedOffset * 100003 + pageIndex1Based * 10007 + rowNum * 313 + 37);
+
+        drawHandwrittenString(ctx, lineText, lineX, lineY, maxLineWidthPx, rowHeightPx * sizeMul, rng, false, {
+          collect: collectHits,
+          startAtZero: true,
+          alignLeft: true,
+          maxWidth: maxLineWidthPx * 0.98,
+          page: pageIndex1Based,
+          r: rowNum,
+          c: 1
+        });
+
+        if (collectHits) {
+          state.hitBoxes.rows.push({
+            type: 'row',
+            key: rowKey,
+            page: pageIndex1Based,
+            r: rowNum,
+            x: lineX,
+            y: lineY - rowHeightPx * 0.45,
+            w: maxLineWidthPx,
+            h: rowHeightPx * 0.9
+          });
+        }
+      }
+      return;
+    }
+
+    // ---- 'inplace' mode: Preserve original A4 page layout & diagrams, erase printed text, draw editable handwriting ----
+    const w = pageObj.width;
+    const h = pageObj.height;
+    targetCanvas.width = w;
+    targetCanvas.height = h;
+    const ctx = targetCanvas.getContext('2d');
+    ctx.clearRect(0, 0, w, h);
+
+    if (pageObj.img) {
+      ctx.drawImage(pageObj.img, 0, 0, w, h);
+    } else {
+      ctx.fillStyle = '#ffffff';
+      ctx.fillRect(0, 0, w, h);
+    }
+
+    const font = fontsRegistry[activeFontIndex];
+    if (!font) return;
+
+    const blocks = getOcrBlocksForPage(pageIndex1Based);
+    const activeIndices = getActiveOcrIndices(pageIndex1Based);
+    const extraLines = getOcrExtraLinesForPage(pageIndex1Based);
+    const globalShiftX = (pg.startX - 1.8) * PX_PER_CM;
+    const globalShiftY = (pg.startY - 1.8) * PX_PER_CM;
+    const sizeMul = Math.max(0.55, Math.min(1.85, (cfg.rowHeight || 0.85) / 0.85));
+
+    // PASS 1: Cleanly white-out / paper-fill original printed text spans while leaving circuit diagrams intact
+    for (const blockIdx of activeIndices) {
+      const b = blocks[blockIdx];
+      const isEdited = b.origText !== undefined && b.text !== b.origText;
+      const paperColor = sampleBrightPaperFill(ctx, b.xCm * PX_PER_CM - 3, b.yCm * PX_PER_CM - 3);
+      ctx.fillStyle = paperColor;
+
+      if (!isEdited && b.segs && b.segs.length > 0) {
+        for (const seg of b.segs) {
+          const ex = seg.xCm * PX_PER_CM - 2.5;
+          const ey = seg.yCm * PX_PER_CM - 2.5;
+          const ew = seg.wCm * PX_PER_CM + 7;
+          const eh = seg.hCm * PX_PER_CM + 5.5;
+          ctx.fillRect(ex, ey, ew, eh);
+        }
+      } else {
+        const ex = b.xCm * PX_PER_CM - 2.5;
+        const ey = b.yCm * PX_PER_CM - 2.5;
+        let maxEraseW = Math.max(b.wCm, (b.text || '').length * (b.hCm || 0.42) * 0.68) * PX_PER_CM + 8;
+        // Guard against erasing diagrams to the right on the same vertical band
+        for (const d of blocks) {
+          if (!d.isDiagram) continue;
+          if (d.yCm < b.yCm + b.hCm && d.yCm + d.hCm > b.yCm && d.xCm > b.xCm + 0.4) {
+            maxEraseW = Math.min(maxEraseW, d.xCm * PX_PER_CM - ex - 4);
+          }
+        }
+        ctx.fillRect(ex, ey, Math.max(12, maxEraseW), b.hCm * PX_PER_CM + 6);
+      }
+    }
+
+    // PASS 2: Render editable handwritten strokes on top & register draggable/dbl-clickable hitboxes
+    let lastEndYCm = 2.6;
+    for (const blockIdx of activeIndices) {
+      const b = blocks[blockIdx];
+      lastEndYCm = Math.max(lastEndYCm, b.yCm + b.hCm);
+      const txt = b.text;
+      if (!txt || !txt.trim()) continue;
+
+      const isEdited = b.origText !== undefined && b.text !== b.origText;
+      const rowNum = blockIdx + 1;
+      const rowKey = `${pageIndex1Based}-${rowNum}`;
+      const rowOff = (cfg.rowOffsets && cfg.rowOffsets[rowKey]) || { dx: 0, dy: 0 };
+      const rdx = (rowOff.dx || 0) * PX_PER_CM;
+      const rdy = (rowOff.dy || 0) * PX_PER_CM;
+
+      let rightLimitPx = w - 28;
+      for (const d of blocks) {
+        if (!d.isDiagram) continue;
+        if (d.yCm < b.yCm + b.hCm + 0.08 && d.yCm + d.hCm + 0.08 > b.yCm && d.xCm > b.xCm + 0.4) {
+          rightLimitPx = Math.min(rightLimitPx, d.xCm * PX_PER_CM - 6);
+        }
+      }
+
+      if (!isEdited && b.segs && b.segs.length > 0) {
+        for (let segIdx = 0; segIdx < b.segs.length; segIdx++) {
+          const seg = b.segs[segIdx];
+          const colNum = segIdx + 1;
+          const cellKey = `${pageIndex1Based}-${rowNum}-${colNum}`;
+          const cellOff = (cfg.cellOffsets && cfg.cellOffsets[cellKey]) || { dx: 0, dy: 0 };
+          const originX = seg.xCm * PX_PER_CM + globalShiftX + rdx + (cellOff.dx || 0) * PX_PER_CM;
+          const originY = seg.yCm * PX_PER_CM + seg.hCm * PX_PER_CM * 0.50 + globalShiftY + rdy + (cellOff.dy || 0) * PX_PER_CM;
+          const effRowH = Math.max(22, Math.min(72, seg.hCm * PX_PER_CM * 1.72 * sizeMul));
+          const nextSeg = b.segs[segIdx + 1];
+          const segMaxW = nextSeg
+            ? Math.max(seg.wCm * PX_PER_CM * 1.02, (nextSeg.xCm - seg.xCm) * PX_PER_CM - 4)
+            : Math.max(seg.wCm * PX_PER_CM * 1.12, rightLimitPx - seg.xCm * PX_PER_CM);
+          const rng = mulberry32(state.globalSeed + seedOffset * 100003 + pageIndex1Based * 10007 + rowNum * 313 + colNum * 37);
+
+          ctx.save();
+          ctx.translate(originX, originY);
+          const cellRotDeg = randRange(rng, cfg.cellRandom.rotate) * 0.45;
+          if (cellRotDeg) ctx.rotate((cellRotDeg * Math.PI) / 180);
+          drawCharactersSequence(ctx, font, seg.text, effRowH, rng, {
+            collect: collectHits,
+            startAtZero: true,
+            alignLeft: true,
+            maxWidth: Math.max(24, segMaxW),
+            originX,
+            originY,
+            cellScale: 1,
+            page: pageIndex1Based,
+            r: rowNum,
+            c: colNum,
+            blockIdx
+          });
+          ctx.restore();
+        }
+      } else {
+        const cellKey = `${pageIndex1Based}-${rowNum}-1`;
+        const cellOff = (cfg.cellOffsets && cfg.cellOffsets[cellKey]) || { dx: 0, dy: 0 };
+        const originX = b.xCm * PX_PER_CM + globalShiftX + rdx + (cellOff.dx || 0) * PX_PER_CM;
+        const originY = b.yCm * PX_PER_CM + b.hCm * PX_PER_CM * 0.50 + globalShiftY + rdy + (cellOff.dy || 0) * PX_PER_CM;
+        const effRowH = Math.max(22, Math.min(72, b.hCm * PX_PER_CM * 1.72 * sizeMul));
+        const lineMaxW = Math.max(b.wCm * PX_PER_CM * 1.08, rightLimitPx - b.xCm * PX_PER_CM);
+        const rng = mulberry32(state.globalSeed + seedOffset * 100003 + pageIndex1Based * 10007 + rowNum * 313 + 37);
+
+        ctx.save();
+        ctx.translate(originX, originY);
+        const cellRotDeg = randRange(rng, cfg.cellRandom.rotate) * 0.45;
+        if (cellRotDeg) ctx.rotate((cellRotDeg * Math.PI) / 180);
+        drawCharactersSequence(ctx, font, txt, effRowH, rng, {
+          collect: collectHits,
+          startAtZero: true,
+          alignLeft: true,
+          maxWidth: Math.max(24, lineMaxW),
+          originX,
+          originY,
+          cellScale: 1,
+          page: pageIndex1Based,
+          r: rowNum,
+          c: 1,
+          blockIdx
+        });
+        ctx.restore();
+      }
+
+      if (collectHits) {
+        state.hitBoxes.rows.push({
+          type: 'row',
+          key: rowKey,
+          page: pageIndex1Based,
+          r: rowNum,
+          blockIdx,
+          x: b.xCm * PX_PER_CM + globalShiftX + rdx,
+          y: b.yCm * PX_PER_CM + globalShiftY + rdy,
+          w: Math.max(28, b.wCm * PX_PER_CM),
+          h: Math.max(20, b.hCm * PX_PER_CM)
+        });
+      }
+    }
+
+    // Extra user-appended lines added via left textarea
+    extraLines.forEach((lineTxt, exIdx) => {
+      if (!lineTxt || !lineTxt.trim()) return;
+      const rowNum = blocks.length + exIdx + 1;
+      const rowKey = `${pageIndex1Based}-${rowNum}`;
+      const rowOff = (cfg.rowOffsets && cfg.rowOffsets[rowKey]) || { dx: 0, dy: 0 };
+      const originX = 3.18 * PX_PER_CM + globalShiftX + (rowOff.dx || 0) * PX_PER_CM;
+      const originY = (lastEndYCm + 0.55 + exIdx * 0.85) * PX_PER_CM + globalShiftY + (rowOff.dy || 0) * PX_PER_CM;
+      const effRowH = Math.max(24, 0.85 * PX_PER_CM * sizeMul);
+      const rng = mulberry32(state.globalSeed + seedOffset * 100003 + pageIndex1Based * 10007 + rowNum * 313 + 37);
+
+      ctx.save();
+      ctx.translate(originX, originY);
+      drawCharactersSequence(ctx, font, lineTxt, effRowH, rng, {
+        collect: collectHits,
+        startAtZero: true,
+        alignLeft: true,
+        maxWidth: w - originX - 30,
+        originX,
+        originY,
+        cellScale: 1,
+        page: pageIndex1Based,
+        r: rowNum,
+        c: 1
+      });
+      ctx.restore();
+    });
+  }
+
   function renderPageToCanvas(pageIndex1Based, targetCanvas, seedOffset = 0) {
+    if (state.config.fillMode === 'pdf_ocr') {
+      renderPdfOcrPage(pageIndex1Based, targetCanvas, seedOffset);
+      return;
+    }
     const pageObj = state.pages[pageIndex1Based - 1];
     if (!pageObj) return;
 
@@ -1495,7 +2248,9 @@ Practice makes perfect: ABCDEFGHIJKLMNOPQRSTUVWXYZ & abcdefghijklmnopqrstuvwxyz 
     for (let r = 0; r < rows; r++) {
       const rowKey = `${pageIndex1Based}-${r}`;
       const rowOff = (state.config.rowOffsets && state.config.rowOffsets[rowKey]) || { dx: 0, dy: 0 };
-      const baseCellCenterY = startYPx + (r + 0.5) * rowHeightPx + rowOff.dy;
+      const rdxPx = (rowOff.dx || 0) * PX_PER_CM;
+      const rdyPx = (rowOff.dy || 0) * PX_PER_CM;
+      const baseCellCenterY = startYPx + (r + 0.5) * rowHeightPx + rdyPx;
 
       if (collectHits) {
         state.hitBoxes.rows.push({
@@ -1503,7 +2258,7 @@ Practice makes perfect: ABCDEFGHIJKLMNOPQRSTUVWXYZ & abcdefghijklmnopqrstuvwxyz 
           key: rowKey,
           page: pageIndex1Based,
           r,
-          x: startXPx + rowOff.dx,
+          x: startXPx + rdxPx,
           y: baseCellCenterY - rowHeightPx * 0.48,
           w: cols * colWidthPx,
           h: rowHeightPx * 0.96
@@ -1519,8 +2274,8 @@ Practice makes perfect: ABCDEFGHIJKLMNOPQRSTUVWXYZ & abcdefghijklmnopqrstuvwxyz 
         const customColOffsetCm = (state.config.colOffsets && state.config.colOffsets['1']) || 0;
         const cellKey = `${pageIndex1Based}-${r}-1`;
         const cellOff = (state.config.cellOffsets && state.config.cellOffsets[cellKey]) || { dx: 0, dy: 0 };
-        const lineStartX = startXPx + customColOffsetCm * PX_PER_CM + rowOff.dx + cellOff.dx;
-        const lineCenterY = baseCellCenterY + cellOff.dy;
+        const lineStartX = startXPx + customColOffsetCm * PX_PER_CM + rdxPx + (cellOff.dx || 0) * PX_PER_CM;
+        const lineCenterY = baseCellCenterY + (cellOff.dy || 0) * PX_PER_CM;
 
         const lineSeed =
           state.globalSeed +
@@ -1548,8 +2303,8 @@ Practice makes perfect: ABCDEFGHIJKLMNOPQRSTUVWXYZ & abcdefghijklmnopqrstuvwxyz 
         const cellOff = (state.config.cellOffsets && state.config.cellOffsets[cellKey]) || { dx: 0, dy: 0 };
 
         const colLeftPx = startXPx + (c - 1) * colWidthPx + customColOffsetCm * PX_PER_CM;
-        const cellCenterX = colLeftPx + colWidthPx * 0.5 + rowOff.dx + cellOff.dx;
-        const cellCenterY = baseCellCenterY + cellOff.dy;
+        const cellCenterX = colLeftPx + colWidthPx * 0.5 + rdxPx + (cellOff.dx || 0) * PX_PER_CM;
+        const cellCenterY = baseCellCenterY + (cellOff.dy || 0) * PX_PER_CM;
 
         const cellSeed =
           state.globalSeed +
@@ -1610,6 +2365,15 @@ Practice makes perfect: ABCDEFGHIJKLMNOPQRSTUVWXYZ & abcdefghijklmnopqrstuvwxyz 
     // 2. Blue Column Guides for active columns
     const guidesContainer = document.getElementById('colGuidesContainer');
     guidesContainer.innerHTML = '';
+    const rowGuidesContainer = document.getElementById('rowGuidesContainer');
+
+    if (state.config.fillMode === 'pdf_ocr') {
+      if (rowGuidesContainer) rowGuidesContainer.innerHTML = '';
+      document.getElementById('colWidthRuler').hidden = true;
+      document.getElementById('rowHeightRuler').hidden = true;
+      return;
+    }
+
     const tableHeightPx = pg.rows * rowHeightPx;
 
     for (let c = 1; c <= state.config.cols; c++) {
@@ -1657,7 +2421,6 @@ Practice makes perfect: ABCDEFGHIJKLMNOPQRSTUVWXYZ & abcdefghijklmnopqrstuvwxyz 
     }
 
     // 2b. Per-Row Drag Handles on the left side of each row
-    const rowGuidesContainer = document.getElementById('rowGuidesContainer');
     if (rowGuidesContainer) {
       rowGuidesContainer.innerHTML = '';
       const tableWidthPx = state.config.cols * colWidthPx;
@@ -1757,9 +2520,12 @@ Practice makes perfect: ABCDEFGHIJKLMNOPQRSTUVWXYZ & abcdefghijklmnopqrstuvwxyz 
     const viewport = document.getElementById('canvasViewport');
     const pageObj = state.pages[state.currentPage - 1];
     if (!viewport || !pageObj) return;
+    const vw = viewport.clientWidth || 940;
+    const fitZoom = Math.floor(((vw - 44) / pageObj.width) * 100);
     const isLandscape = pageObj.width > pageObj.height;
-    state.zoom = isLandscape ? 84 : 96;
-    state.panX = 16;
+    const maxDefault = isLandscape ? 84 : 96;
+    state.zoom = Math.max(45, Math.min(maxDefault, fitZoom > 0 ? fitZoom : maxDefault));
+    state.panX = Math.max(12, Math.round((vw - pageObj.width * (state.zoom / 100)) / 2));
     state.panY = 12;
     updateStageTransform();
   }
@@ -1783,7 +2549,8 @@ Practice makes perfect: ABCDEFGHIJKLMNOPQRSTUVWXYZ & abcdefghijklmnopqrstuvwxyz 
         height: p.height,
         widthCm: p.widthCm,
         heightCm: p.heightCm,
-        img
+        img,
+        ocrBlocks: p.ocrBlocks ? deepClone(p.ocrBlocks) : []
       });
     }
 
@@ -1795,6 +2562,8 @@ Practice makes perfect: ABCDEFGHIJKLMNOPQRSTUVWXYZ & abcdefghijklmnopqrstuvwxyz 
     state.config.rowOffsets = {};
     state.config.cellOffsets = {};
     state.config.charOffsets = {};
+    state.config.ocrPageBlocks = {};
+    state.config.ocrExtraLines = {};
     if (!state.config.inkColor) state.config.inkColor = '#161616';
 
     if (ex.config.fillMode === 'manual') {
@@ -1818,13 +2587,21 @@ Practice makes perfect: ABCDEFGHIJKLMNOPQRSTUVWXYZ & abcdefghijklmnopqrstuvwxyz 
     });
   }
 
-  async function loadUserPdfFile(file) {
+  async function loadUserPdfFile(file, options = {}) {
     if (!file || !window.pdfjsLib) return;
+    const statusTxt = document.getElementById('statusBarText');
+    if (statusTxt) statusTxt.textContent = `正在解析 PDF 并识别文字: ${file.name} ...`;
+
     const buf = await file.arrayBuffer();
     const pdfDoc = await window.pdfjsLib.getDocument({ data: buf }).promise;
     const loadedPages = [];
+    const carryState = { inAnswerBlock: false };
+    let totalRecognizedLines = 0;
 
     for (let i = 1; i <= pdfDoc.numPages; i++) {
+      if (statusTxt) {
+        statusTxt.textContent = `正在读取与识别 PDF 文字 (${i}/${pdfDoc.numPages} 页): ${file.name}`;
+      }
       const page = await pdfDoc.getPage(i);
       const vp1 = page.getViewport({ scale: 1 });
       // Standard PDF point is 1/72 inch; 1 inch = 2.54 cm -> scale to PX_PER_CM (60 px/cm)
@@ -1835,6 +2612,15 @@ Practice makes perfect: ABCDEFGHIJKLMNOPQRSTUVWXYZ & abcdefghijklmnopqrstuvwxyz 
       offCanvas.height = Math.round(vp.height);
       const offCtx = offCanvas.getContext('2d');
       await page.render({ canvasContext: offCtx, viewport: vp }).promise;
+
+      let ocrBlocks = [];
+      try {
+        const tc = await page.getTextContent();
+        ocrBlocks = extractOcrBlocksFromTextContent(tc, vp1, carryState);
+      } catch (err) {
+        console.warn('PDF text extraction warning on page', i, err);
+      }
+      totalRecognizedLines += ocrBlocks.filter((b) => !b.isDiagram && b.text.trim()).length;
 
       const dataUrl = offCanvas.toDataURL('image/png');
       const img = await new Promise((resolve) => {
@@ -1847,20 +2633,52 @@ Practice makes perfect: ABCDEFGHIJKLMNOPQRSTUVWXYZ & abcdefghijklmnopqrstuvwxyz 
         height: offCanvas.height,
         widthCm: Number((offCanvas.width / PX_PER_CM).toFixed(2)),
         heightCm: Number((offCanvas.height / PX_PER_CM).toFixed(2)),
-        img
+        img,
+        ocrBlocks
       });
     }
 
     state.pages = loadedPages;
     state.currentPage = 1;
     state.projectPath = file.name;
+
+    // Automatically enter editable A4 PDF-to-handwriting mode when requested OR when PDF has dense text lines
+    const shouldEnterOcrMode = Boolean(options.autoOcr) || totalRecognizedLines >= 8;
+    if (shouldEnterOcrMode) {
+      state.config.fillMode = 'pdf_ocr';
+      state.config.ocrPaperStyle = state.config.ocrPaperStyle || 'inplace';
+      state.config.ocrConvertScope = state.config.ocrConvertScope || 'all';
+      state.config.startX = 1.8;
+      state.config.startY = 1.8;
+      state.config.rowHeight = 0.85;
+      state.config.cellPad = 0.0;
+      state.config.inkColor = state.config.inkColor || '#1b365d';
+      state.config.pageConfigs = {};
+      state.config.colOffsets = {};
+      state.config.rowOffsets = {};
+      state.config.cellOffsets = {};
+      state.config.charOffsets = {};
+      state.config.ocrPageBlocks = {};
+      state.config.ocrExtraLines = {};
+    }
+
     showWorkspaceView();
     refreshPageNavUI();
     syncAllControlsFromState();
+    historyStack.length = 0;
+    historyIndex = -1;
     pushHistory();
     requestAnimationFrame(() => {
       fitPageToViewport();
       renderCurrentPage();
+      if (shouldEnterOcrMode && totalRecognizedLines === 0) {
+        showNoticeDialog(
+          '已载入 PDF 页面（纯扫描图片型 PDF）',
+          '此 PDF 页面中未包含内嵌文字层（扫描件/纯图片）。已自动为您切换到「🔍 识字转A4」可编辑模式，您可直接切换为 A4 横线纸或直接在左侧文本框中输入/粘贴内容生成手写体 A4！'
+        );
+      } else if (shouldEnterOcrMode && statusTxt) {
+        statusTxt.textContent = `已识别 ${pdfDoc.numPages} 页共 ${totalRecognizedLines} 行文字并转为可编辑 A4 手写体（支持左侧改字或画布双击单行编辑）`;
+      }
     });
   }
 
@@ -2245,7 +3063,9 @@ Practice makes perfect: ABCDEFGHIJKLMNOPQRSTUVWXYZ & abcdefghijklmnopqrstuvwxyz 
   function fmExtractCurrentDocChars() {
     const cfg = state.config;
     let poolStr = '';
-    if (cfg.fillMode === 'article' && cfg.articleText) {
+    if (cfg.fillMode === 'pdf_ocr') {
+      poolStr = getActiveOcrTextForPage(state.currentPage);
+    } else if (cfg.fillMode === 'article' && cfg.articleText) {
       poolStr = cfg.articleText;
     } else if (cfg.fillMode === 'manual' && Array.isArray(cfg.manualData)) {
       poolStr = cfg.manualData.map((r) => (Array.isArray(r) ? r.join('') : '')).join('');
@@ -2991,10 +3811,31 @@ Practice makes perfect: ABCDEFGHIJKLMNOPQRSTUVWXYZ & abcdefghijklmnopqrstuvwxyz 
     }
 
     const fileInputPdf = document.getElementById('fileInputPdf');
-    document.getElementById('btnHomeSelectPdf').addEventListener('click', () => fileInputPdf.click());
+    let nextPdfAutoOcr = false;
+    document.getElementById('btnHomeSelectPdf').addEventListener('click', () => {
+      nextPdfAutoOcr = false;
+      fileInputPdf.click();
+    });
+    const btnHomeOcrPdf = document.getElementById('btnHomeOcrPdf');
+    if (btnHomeOcrPdf) {
+      btnHomeOcrPdf.addEventListener('click', () => {
+        nextPdfAutoOcr = true;
+        fileInputPdf.click();
+      });
+    }
+    const btnOcrUploadPdf = document.getElementById('btnOcrUploadPdf');
+    if (btnOcrUploadPdf) {
+      btnOcrUploadPdf.addEventListener('click', () => {
+        nextPdfAutoOcr = true;
+        fileInputPdf.click();
+      });
+    }
     document.getElementById('btnReselectPdf').addEventListener('click', () => showHomeView());
     fileInputPdf.addEventListener('change', (e) => {
-      if (e.target.files && e.target.files[0]) loadUserPdfFile(e.target.files[0]);
+      if (e.target.files && e.target.files[0]) {
+        loadUserPdfFile(e.target.files[0], { autoOcr: nextPdfAutoOcr });
+      }
+      nextPdfAutoOcr = false;
       e.target.value = '';
     });
 
@@ -3172,6 +4013,17 @@ Practice makes perfect: ABCDEFGHIJKLMNOPQRSTUVWXYZ & abcdefghijklmnopqrstuvwxyz 
         renderCurrentPage();
       });
     }
+    const tabFillOcr = document.getElementById('tabFillOcr');
+    if (tabFillOcr) {
+      tabFillOcr.addEventListener('click', () => {
+        state.config.fillMode = 'pdf_ocr';
+        state.config.ocrPaperStyle = state.config.ocrPaperStyle || 'inplace';
+        state.config.ocrConvertScope = state.config.ocrConvertScope || 'all';
+        syncAllControlsFromState();
+        updateStageOverlayHandles();
+        renderCurrentPage();
+      });
+    }
 
     document.getElementById('btnPresetTemp').addEventListener('click', () => {
       state.config.visionPreset = false;
@@ -3268,6 +4120,71 @@ Practice makes perfect: ABCDEFGHIJKLMNOPQRSTUVWXYZ & abcdefghijklmnopqrstuvwxyz 
     bindSampleArticleBtn('btnSampleCnEssay', 'cn_essay', 'grid');
     bindSampleArticleBtn('btnSampleEnEssay', 'en_essay', 'lines');
     bindSampleArticleBtn('btnSampleScratch', 'scratch_math', 'lines');
+
+    // PDF Auto-OCR -> Editable A4 Handwriting Controls
+    const ocrPaperStyleSelect = document.getElementById('ocrPaperStyleSelect');
+    if (ocrPaperStyleSelect) {
+      ocrPaperStyleSelect.addEventListener('change', (e) => {
+        state.config.fillMode = 'pdf_ocr';
+        state.config.ocrPaperStyle = e.target.value || 'inplace';
+        pushHistory();
+        syncAllControlsFromState();
+        renderCurrentPage();
+      });
+    }
+    const ocrConvertScopeSelect = document.getElementById('ocrConvertScopeSelect');
+    if (ocrConvertScopeSelect) {
+      ocrConvertScopeSelect.addEventListener('change', (e) => {
+        state.config.fillMode = 'pdf_ocr';
+        state.config.ocrConvertScope = e.target.value || 'all';
+        pushHistory();
+        syncAllControlsFromState();
+        renderCurrentPage();
+      });
+    }
+    const ocrPageTextarea = document.getElementById('ocrPageTextarea');
+    if (ocrPageTextarea) {
+      ocrPageTextarea.addEventListener('input', (e) => {
+        state.config.fillMode = 'pdf_ocr';
+        applyOcrTextToPage(state.currentPage, e.target.value);
+        renderCurrentPage();
+      });
+      ocrPageTextarea.addEventListener('change', () => pushHistory());
+    }
+    const btnOcrResetPageText = document.getElementById('btnOcrResetPageText');
+    if (btnOcrResetPageText) {
+      btnOcrResetPageText.addEventListener('click', () => resetCurrentPageOcrText(state.currentPage));
+    }
+
+    // Modal for double-click editing a single OCR handwritten line on canvas
+    const dlgOcrLine = document.getElementById('dialogEditOcrLine');
+    const ocrLineInp = document.getElementById('ocrLineModalInput');
+    const saveOcrLineFromModal = () => {
+      if (editingOcrBlockIdx >= 0 && ocrLineInp) {
+        const blocks = getOcrBlocksForPage(state.currentPage);
+        if (blocks[editingOcrBlockIdx]) {
+          blocks[editingOcrBlockIdx].text = ocrLineInp.value;
+          syncAllControlsFromState();
+          pushHistory();
+          renderCurrentPage();
+        }
+      }
+      if (dlgOcrLine && dlgOcrLine.open) dlgOcrLine.close();
+    };
+    const btnSaveOcrLineModal = document.getElementById('btnSaveOcrLineModal');
+    if (btnSaveOcrLineModal) btnSaveOcrLineModal.addEventListener('click', saveOcrLineFromModal);
+    const btnCancelOcrLineModal = document.getElementById('btnCancelOcrLineModal');
+    if (btnCancelOcrLineModal) btnCancelOcrLineModal.addEventListener('click', () => dlgOcrLine && dlgOcrLine.close());
+    const btnCloseOcrLineModal = document.getElementById('btnCloseOcrLineModal');
+    if (btnCloseOcrLineModal) btnCloseOcrLineModal.addEventListener('click', () => dlgOcrLine && dlgOcrLine.close());
+    if (ocrLineInp) {
+      ocrLineInp.addEventListener('keydown', (e) => {
+        if (e.key === 'Enter') {
+          e.preventDefault();
+          saveOcrLineFromModal();
+        }
+      });
+    }
 
     // Edit Slot Modal
     document.getElementById('slotTypeSelect').addEventListener('change', (e) => {
@@ -3559,17 +4476,18 @@ Practice makes perfect: ABCDEFGHIJKLMNOPQRSTUVWXYZ & abcdefghijklmnopqrstuvwxyz 
         }
         return null;
       };
+      const editSuffix = state.config.fillMode === 'pdf_ocr' ? ' · 双击改字' : '';
       if (state.dragMode === 'char') {
         const chHit = hitInList(state.hitBoxes.chars, 4);
-        if (chHit) return { type: 'char', box: chHit, label: `拖动单字 "${chHit.ch}" (行${chHit.r}列${chHit.c})` };
+        if (chHit) return { type: 'char', box: chHit, label: `拖动单字 "${chHit.ch}" (行${chHit.r}列${chHit.c})${editSuffix}` };
         const cellHit = hitInList(state.hitBoxes.cells, 2);
-        if (cellHit) return { type: 'cell', box: cellHit, label: `拖动单格 "${cellHit.text}" (行${cellHit.r}列${cellHit.c})` };
+        if (cellHit) return { type: 'cell', box: cellHit, label: `拖动单格 "${cellHit.text}" (行${cellHit.r}列${cellHit.c})${editSuffix}` };
       } else if (state.dragMode === 'cell') {
         const cellHit = hitInList(state.hitBoxes.cells, 4);
-        if (cellHit) return { type: 'cell', box: cellHit, label: `拖动单格 "${cellHit.text}" (行${cellHit.r}列${cellHit.c})` };
+        if (cellHit) return { type: 'cell', box: cellHit, label: `拖动单格 "${cellHit.text}" (行${cellHit.r}列${cellHit.c})${editSuffix}` };
       } else if (state.dragMode === 'row') {
         const rowHit = hitInList(state.hitBoxes.rows, 2);
-        if (rowHit) return { type: 'row', box: rowHit, label: `拖动整行 (第 ${rowHit.r} 行)` };
+        if (rowHit) return { type: 'row', box: rowHit, label: `拖动整行 (第 ${rowHit.r} 行)${editSuffix}` };
       }
       return null;
     };
@@ -3683,6 +4601,32 @@ Practice makes perfect: ABCDEFGHIJKLMNOPQRSTUVWXYZ & abcdefghijklmnopqrstuvwxyz 
     viewport.addEventListener('pointercancel', endPan);
     viewport.addEventListener('pointerleave', () => {
       if (!activeDragTarget) showHoverBox(null);
+    });
+
+    // Double-click any handwritten line on canvas in pdf_ocr mode to directly edit its text
+    viewport.addEventListener('dblclick', (e) => {
+      if (state.config.fillMode !== 'pdf_ocr') return;
+      const pt = toStageCoords(e);
+      const findIn = (list, pad) => {
+        if (!list) return null;
+        for (let i = list.length - 1; i >= 0; i--) {
+          const b = list[i];
+          if (pt.x >= b.x - pad && pt.x <= b.x + b.w + pad && pt.y >= b.y - pad && pt.y <= b.y + b.h + pad) {
+            return b;
+          }
+        }
+        return null;
+      };
+      const hit =
+        findIn(state.hitBoxes && state.hitBoxes.chars, 4) ||
+        findIn(state.hitBoxes && state.hitBoxes.cells, 4) ||
+        findIn(state.hitBoxes && state.hitBoxes.rows, 4);
+      if (hit && hit.blockIdx !== undefined && hit.blockIdx >= 0) {
+        openOcrLineEditModal(hit.blockIdx);
+      } else {
+        const ta = document.getElementById('ocrPageTextarea');
+        if (ta) ta.focus();
+      }
     });
 
     viewport.addEventListener(
@@ -4034,14 +4978,20 @@ Practice makes perfect: ABCDEFGHIJKLMNOPQRSTUVWXYZ & abcdefghijklmnopqrstuvwxyz 
         activeFontIndex = Math.min(fontsRegistry.length - 1, Math.max(0, Number(params.get('style'))));
         refreshFontSelectUI();
       }
+      if (params.get('ocrStyle')) {
+        state.config.ocrPaperStyle = params.get('ocrStyle');
+      }
+      if (params.get('ocrScope')) {
+        state.config.ocrConvertScope = params.get('ocrScope');
+      }
       if (params.get('ink')) {
         state.config.inkColor = params.get('ink');
-        syncAllControlsFromState();
       }
       if (params.get('page')) {
         state.currentPage = Math.max(1, Math.min(state.pages.length, Number(params.get('page'))));
         refreshPageNavUI();
       }
+      syncAllControlsFromState();
       if (params.get('zoom')) {
         state.zoom = Number(params.get('zoom'));
         state.panX = Number(params.get('panX') || -60);

@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>手写体生成器 · 汉字 / 英语字母 / 数字填表与稿纸生成工具</title>
-  <link rel="stylesheet" href="styles.css?v=12">
+  <link rel="stylesheet" href="styles.css?v=13">
 </head>
 <body>
   <div class="app-shell">
@@ -20,13 +20,14 @@
       </div>
     </header>
 
-    <!-- ================= VIEW 1: HOME (请选择空表/稿纸PDF - 8大双页PDF示例) ================= -->
+    <!-- ================= VIEW 1: HOME (请选择空表/稿纸/作业PDF - 9大多页PDF示例) ================= -->
     <main class="home-view" id="homeView">
       <div class="examples-showcase" id="examplesShowcaseGrid">
-        <!-- Populated dynamically from window.HANDWRITE_EXAMPLES (8 multi-page PDF examples) -->
+        <!-- Populated dynamically from window.HANDWRITE_EXAMPLES (9 multi-page PDF examples) -->
       </div>
-      <h1 class="home-title">请选择空表 / 作文纸 / 草稿纸 PDF（点击上方 8 个双页示例一键体验）</h1>
+      <h1 class="home-title">请选择空表 / 作文纸 / 作业 PDF（点击上方 9 个多页示例一键体验，或上传 PDF 自动识字转 A4 手写）</h1>
       <div class="home-actions">
+        <button type="button" class="home-btn" id="btnHomeOcrPdf" style="background:var(--brand-color);color:#fff;border-color:var(--brand-color);font-weight:600;padding:0 18px;">🔍 上传 PDF 自动识字转 A4 手写</button>
         <button type="button" class="home-btn" id="btnHomeSelectPdf">选择本地 PDF</button>
         <button type="button" class="home-btn" id="btnHomeLoadProject">加载项目</button>
         <button type="button" class="home-btn" id="btnHomeOpenFontMaker">制作手写字体</button>
@@ -72,7 +73,7 @@
         </div>
 
         <div class="toolbar-right">
-          <select id="quickExampleSelect" class="page-select" style="height:28px;max-width:195px;" title="快速切换内置的 8 个双页 PDF 表格/作文纸/草稿纸示例" aria-label="快速切换示例">
+          <select id="quickExampleSelect" class="page-select" style="height:28px;max-width:205px;" title="快速切换内置的 9 个多页 PDF 表格/作文纸/草稿纸/作业识字示例" aria-label="快速切换示例">
             <option value="example1">📂 示例1: 晨午检体温表(2页)</option>
             <option value="example2">📂 示例2: 学生视力登记表(2页)</option>
             <option value="example3">📂 示例3: 实验考勤与中英评定表(2页)</option>
@@ -81,6 +82,7 @@
             <option value="example6">📂 示例6: 英语横线手写作文纸(2页)</option>
             <option value="example7">📂 示例7: 空白数学物理草稿纸(2页)</option>
             <option value="example8">📂 示例8: 中英双语读书笔记纸(2页)</option>
+            <option value="example9">📂 示例9: 《电路理论》作业(PDF识字转A4手写·14页)</option>
           </select>
           <button type="button" class="btn" id="btnRerollSeed" title="重新随机生成全部单元格手写字迹">🎲 换一批字迹</button>
           <button type="button" class="btn" id="btnReselectPdf">重新选择PDF</button>
@@ -195,6 +197,7 @@
               <button type="button" class="fill-tab active" id="tabFillRandom">随机填写</button>
               <button type="button" class="fill-tab" id="tabFillManual">手动表格</button>
               <button type="button" class="fill-tab" id="tabFillArticle">文章/稿纸</button>
+              <button type="button" class="fill-tab" id="tabFillOcr">🔍 识字转A4</button>
             </div>
 
             <div class="fill-panel-box" id="panelFillRandom">
@@ -237,6 +240,34 @@
                 <button type="button" class="btn" id="btnSampleScratch">📐 数学物理演算草稿</button>
               </div>
               <textarea id="articleTextarea" class="article-textarea" rows="6" placeholder="在此输入或粘贴任意中文作文、英语短文、读书笔记或数学公式草稿，画布将实时生成逼真手写笔迹..."></textarea>
+            </div>
+
+            <div class="fill-panel-box" id="panelFillOcr" hidden>
+              <div class="control-row" style="margin-bottom:8px;">
+                <label class="row-label" for="ocrPaperStyleSelect" style="width:66px;">A4 纸张</label>
+                <select id="ocrPaperStyleSelect" class="page-select" style="flex:1;height:28px;">
+                  <option value="inplace">🎯 原卷 A4 原位转手写 (擦除印刷字+保留插图)</option>
+                  <option value="a4_ruled">📝 A4 大学作业横线纸 (识别全文重排手写)</option>
+                  <option value="a4_blank">📄 纯白 A4 纸 (无格线 · 识别全文重排手写)</option>
+                  <option value="a4_scratch">📒 A4 护眼微黄演算纸 (识别全文重排手写)</option>
+                  <option value="a4_grid">🔲 A4 红格方格稿纸 20×20 (逐格填入)</option>
+                </select>
+              </div>
+              <div class="control-row" style="margin-bottom:8px;" id="ocrScopeRow">
+                <label class="row-label" for="ocrConvertScopeSelect" style="width:66px;">转换范围</label>
+                <select id="ocrConvertScopeSelect" class="page-select" style="flex:1;height:28px;">
+                  <option value="all">🔄 整页全文全部转手写 (题目+答案全手写)</option>
+                  <option value="answers">✍️ 仅解答与答案转手写 (保留原卷印刷题干)</option>
+                </select>
+              </div>
+              <div style="display:flex;align-items:center;justify-content:space-between;gap:5px;flex-wrap:wrap;margin-bottom:6px;">
+                <span style="font-size:12px;color:#1d4ed8;font-weight:600;" id="ocrLineCountHint">本页已识别可编辑手写文本：</span>
+                <div style="display:flex;gap:4px;flex-wrap:wrap;">
+                  <button type="button" class="btn" id="btnOcrUploadPdf" style="height:24px;padding:0 8px;font-size:11.5px;">📂 上传PDF自动识字</button>
+                  <button type="button" class="btn" id="btnOcrResetPageText" style="height:24px;padding:0 8px;font-size:11.5px;" title="恢复当前页从 PDF 原始识别出的文字">↺ 恢复本页原文</button>
+                </div>
+              </div>
+              <textarea id="ocrPageTextarea" class="article-textarea" rows="8" placeholder="上传任意带文字的 PDF 后，此处会自动识别并提取当前页全部文字。您可以直接在此修改任意字词、填空或增删行，右侧 A4 纸画布将实时同步渲染为手写体（也可在画布上双击任意行直接编辑）..."></textarea>
             </div>
           </div>
 
@@ -604,11 +635,28 @@
     </div>
   </dialog>
 
+  <!-- ================= DIALOG 5: 双击画布直接编辑手写行文字 ================= -->
+  <dialog id="dialogEditOcrLine" aria-labelledby="dialogEditOcrLineTitle" closedby="any" style="min-width:460px;">
+    <div class="modal-header">
+      <h2 class="modal-title" id="dialogEditOcrLineTitle">✎ 编辑 A4 手写行文字</h2>
+      <button type="button" class="icon-btn" id="btnCloseOcrLineModal" aria-label="关闭">✕</button>
+    </div>
+    <div class="modal-body">
+      <label for="ocrLineModalInput" style="display:block;font-size:12.5px;color:#444;margin-bottom:8px;">修改此行手写文字（留空可擦除隐藏该行，按 Enter 快速保存）：</label>
+      <input type="text" id="ocrLineModalInput" class="num-input" style="width:100%;height:36px;text-align:left;padding:0 10px;font-size:14px;" value="">
+      <div style="display:flex;justify-content:flex-end;gap:10px;margin-top:16px;">
+        <button type="button" class="btn" id="btnCancelOcrLineModal">取消</button>
+        <button type="button" class="btn btn-primary" id="btnSaveOcrLineModal">保存手写文字</button>
+      </div>
+    </div>
+  </dialog>
+
   <!-- Local Bundled Assets & Libraries -->
-  <script src="vendor/pdf.min.js?v=12"></script>
-  <script src="vendor/jspdf.umd.min.js?v=12"></script>
-  <script src="assets/default-font.js?v=12"></script>
-  <script src="assets/examples-data.js?v=12"></script>
-  <script src="app.js?v=12"></script>
+  <script src="vendor/pdf.worker.min.js?v=13"></script>
+  <script src="vendor/pdf.min.js?v=13"></script>
+  <script src="vendor/jspdf.umd.min.js?v=13"></script>
+  <script src="assets/default-font.js?v=13"></script>
+  <script src="assets/examples-data.js?v=13"></script>
+  <script src="app.js?v=13"></script>
 </body>
 </html>
